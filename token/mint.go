@@ -150,11 +150,11 @@ func (e *Engine) ensureRevoked(ctx context.Context, mint solana.PublicKey) error
 		if st, err := e.Verify(ctx, mint); err == nil && st.SupplyFixed() {
 			return nil // already revoked (possibly by an earlier revoke that has since landed)
 		}
-		if err := e.RevokeMintAuthority(ctx, mint); err == nil {
+		err := e.RevokeMintAuthority(ctx, mint)
+		if err == nil {
 			return nil // this revoke landed and confirmed
-		} else {
-			last = err
 		}
+		last = err
 		if ctx.Err() != nil {
 			break // the context ended: stop rather than spin
 		}

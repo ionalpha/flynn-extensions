@@ -265,7 +265,7 @@ func (e *Engine) send(ctx context.Context, ixs []solana.Instruction, commitment 
 		return solana.Signature{}, fmt.Errorf("blockhash: %w", err)
 	}
 	if bh == nil || bh.Value == nil {
-		return solana.Signature{}, fmt.Errorf("blockhash: empty response")
+		return solana.Signature{}, errors.New("blockhash: empty response")
 	}
 	tx, err := solana.NewTransaction(ixs, bh.Value.Blockhash, solana.TransactionPayer(e.payer.PublicKey()))
 	if err != nil {
@@ -353,6 +353,8 @@ func (e *Engine) confirmOrExpire(ctx context.Context, sig solana.Signature, last
 				if commitment != rpc.CommitmentFinalized {
 					return nil
 				}
+			case rpc.ConfirmationStatusProcessed:
+				// processed but not yet confirmed or finalized: keep waiting
 			}
 			continue // seen, but not yet at the required commitment: keep waiting
 		}

@@ -134,8 +134,8 @@ func TestSessionAdvanceAfterDoneIsRejected(t *testing.T) {
 	}
 }
 
-var errTestSignFailed = errTestErr("core could not sign")
+var errTestSignFailed = testError("core could not sign")
 
-type errTestErr string
+type testError string
 
-func (e errTestErr) Error() string { return string(e) }
+func (e testError) Error() string { return string(e) }

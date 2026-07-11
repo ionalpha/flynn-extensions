@@ -186,7 +186,7 @@ func (m *mintService) render(id string, s *token.Session) (string, error) {
 		if len(out.Disclosures) > 0 {
 			ds := make([]map[string]string, 0, len(out.Disclosures))
 			for _, d := range out.Disclosures {
-				ds = append(ds, map[string]string{"code": string(d.Code), "detail": d.Detail})
+				ds = append(ds, map[string]string{"code": d.Code, "detail": d.Detail})
 			}
 			resp["disclosures"] = ds
 		}

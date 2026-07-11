@@ -31,15 +31,19 @@ func (f fakeRPC) GetAccountInfoWithOpts(context.Context, solana.PublicKey, *rpc.
 func (fakeRPC) GetLatestBlockhash(context.Context, rpc.CommitmentType) (*rpc.GetLatestBlockhashResult, error) {
 	return nil, errors.New("unexpected call")
 }
+
 func (fakeRPC) GetBlockHeight(context.Context, rpc.CommitmentType) (uint64, error) {
 	return 0, errors.New("unexpected call")
 }
+
 func (fakeRPC) SendTransaction(context.Context, *solana.Transaction) (solana.Signature, error) {
 	return solana.Signature{}, errors.New("unexpected call")
 }
+
 func (fakeRPC) GetSignatureStatuses(context.Context, bool, ...solana.Signature) (*rpc.GetSignatureStatusesResult, error) {
 	return nil, errors.New("unexpected call")
 }
+
 func (fakeRPC) GetMinimumBalanceForRentExemption(context.Context, uint64, rpc.CommitmentType) (uint64, error) {
 	return 0, errors.New("unexpected call")
 }
@@ -102,16 +106,21 @@ type mintFakeRPC struct{ owner solana.PublicKey }
 func (mintFakeRPC) GetMinimumBalanceForRentExemption(context.Context, uint64, rpc.CommitmentType) (uint64, error) {
 	return 1_000_000, nil
 }
+
 func (mintFakeRPC) GetLatestBlockhash(context.Context, rpc.CommitmentType) (*rpc.GetLatestBlockhashResult, error) {
 	return &rpc.GetLatestBlockhashResult{Value: &rpc.LatestBlockhashResult{Blockhash: solana.Hash{1}, LastValidBlockHeight: 1000}}, nil
 }
+
 func (mintFakeRPC) SendTransaction(context.Context, *solana.Transaction) (solana.Signature, error) {
 	return solana.Signature{2}, nil
 }
+
 func (mintFakeRPC) GetSignatureStatuses(context.Context, bool, ...solana.Signature) (*rpc.GetSignatureStatusesResult, error) {
 	return &rpc.GetSignatureStatusesResult{Value: []*rpc.SignatureStatusesResult{{ConfirmationStatus: rpc.ConfirmationStatusFinalized}}}, nil
 }
+
 func (mintFakeRPC) GetBlockHeight(context.Context, rpc.CommitmentType) (uint64, error) { return 0, nil }
+
 func (f mintFakeRPC) GetAccountInfoWithOpts(context.Context, solana.PublicKey, *rpc.GetAccountInfoOpts) (*rpc.GetAccountInfoResult, error) {
 	owner := f.owner
 	if owner.IsZero() {
