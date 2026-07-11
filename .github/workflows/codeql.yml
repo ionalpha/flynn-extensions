@@ -1,0 +1,18 @@
+name: CodeQL
+
+# Thin caller: the analysis lives once in ionalpha/go-ci.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    uses: ionalpha/go-ci/.github/workflows/codeql.yml@main

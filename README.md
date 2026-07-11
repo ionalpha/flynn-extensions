@@ -57,7 +57,7 @@ below.
 
 ## Standards
 
-CI runs via the shared [ionalpha/flynn-ci](https://github.com/ionalpha/flynn-ci) reusable
+CI runs via the shared [ionalpha/go-ci](https://github.com/ionalpha/go-ci) reusable
 workflow (gofumpt/goimports, a strict golangci-lint set, race tests on Linux/macOS/Windows,
 `govulncheck`, and a full-history secret scan). The same bar as flynn core, defined once.
 

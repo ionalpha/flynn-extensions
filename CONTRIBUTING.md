@@ -10,9 +10,9 @@ is the canonical contribution contract (and what automated triage checks against
 3. Make it green locally before opening a PR:
    ```sh
    go build ./... && go vet ./... && go test -race ./...
-   golangci-lint run --config=../flynn-ci/.golangci.yml
+   golangci-lint run --config=../go-ci/.golangci.yml
    ```
-   This mirrors the shared [ionalpha/flynn-ci](https://github.com/ionalpha/flynn-ci) workflow
+   This mirrors the shared [ionalpha/go-ci](https://github.com/ionalpha/go-ci) workflow
    that CI runs.
 4. Open a pull request that links the issue and follows Conventional Commits.
 5. Sign your commits off with DCO: `git commit -s`.

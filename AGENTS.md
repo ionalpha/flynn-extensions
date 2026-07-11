@@ -37,15 +37,15 @@ Extensions are designed to be at least as safe as in-process code. An extension:
 
 ## Local development
 
-CI is the shared [ionalpha/flynn-ci](https://github.com/ionalpha/flynn-ci) reusable workflow,
+CI is the shared [ionalpha/go-ci](https://github.com/ionalpha/go-ci) reusable workflow,
 so a green run there is the bar. To match it locally:
 
 ```sh
 go build ./...
 go vet ./...
 go test -race ./...
-# lint with the SHARED config (clone flynn-ci next to this repo, or point --config at it):
-golangci-lint run --config=../flynn-ci/.golangci.yml
+# lint with the SHARED config (clone go-ci next to this repo, or point --config at it):
+golangci-lint run --config=../go-ci/.golangci.yml
 ```
 
 Internal tooling (any local `CLAUDE.md`, `.claude/`) is git-ignored and must never be
@@ -54,7 +54,7 @@ committed.
 ## Standards
 
 - **Format:** `gofumpt` + `goimports` (local prefix `github.com/ionalpha`).
-- **Lint:** `golangci-lint` must pass against flynn-ci's shared `.golangci.yml`.
+- **Lint:** `golangci-lint` must pass against go-ci's shared `.golangci.yml`.
 - **Tests:** add tests with behavior changes; prefer table-driven and property-based tests.
   The race detector must stay clean.
 - **Commits:** Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, ...). Sign off with
