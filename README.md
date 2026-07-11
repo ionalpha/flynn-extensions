@@ -52,17 +52,43 @@ Everything the extension writes to **stdout is protocol**; log to **stderr** onl
 ## Dev workflow
 
 Build your extension binary and point a dev flynn at it (no release, no signing) to iterate
-locally. The dev-mode wiring on the flynn side is tracked in the extension-platform epic; see
-below.
+locally. flynn refuses to run an unsigned binary outside its explicit dev mode, so a dev link
+is only ever honoured when dev mode is turned on.
+
+## Releases
+
+A tag (`v*`) publishes a GitHub release with one archive per extension for every supported
+platform (Linux, macOS, and Windows on amd64 and arm64), a `checksums.txt` over them, a
+detached cosign signature and certificate for that checksum file, an SBOM per archive, and a
+build-provenance attestation. Signing is keyless (Sigstore/OIDC), so there is no long-lived
+key to manage: a downloader verifies the checksums, and so every artifact they cover, against
+the release workflow's identity.
+
+Verify a download:
+
+```
+cosign verify-blob \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity-regexp '^https://github.com/ionalpha/flynn-extensions' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+gh attestation verify <archive> --repo ionalpha/flynn-extensions
+```
+
+flynn does this verification for you when it installs a released extension; the commands
+above are for verifying a manual download.
 
 ## Standards
 
 CI runs via the shared [ionalpha/go-ci](https://github.com/ionalpha/go-ci) reusable
 workflow (gofumpt/goimports, a strict golangci-lint set, race tests on Linux/macOS/Windows,
 `govulncheck`, and a full-history secret scan). The same bar as flynn core, defined once.
+Releases are built and signed by the pinned `release` workflow.
 
 ## Status
 
-Bootstrapping. This first drop is the MCP-server harness, the example extension, and the CI
-wiring. The token extension and the flynn-side mount/enable/disable machinery follow; the
-plan and security model are tracked in the internal extension-platform epic.
+Bootstrapping. This drop is the MCP-server harness, the example extension, the CI wiring, and
+the signed release pipeline. The token extension and the flynn-side mount, enable, and disable
+machinery follow.
