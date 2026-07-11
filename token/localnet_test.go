@@ -34,7 +34,7 @@ func TestLocalnetMint(t *testing.T) {
 	if endpoint == "" {
 		endpoint = "http://127.0.0.1:8899"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	client := rpc.New(endpoint)
@@ -116,26 +116,30 @@ func TestLocalnetMint(t *testing.T) {
 }
 
 // fundPayer airdrops from the local validator's unlimited faucet and waits for the balance to
-// land, so the mint has rent + fees. On a public cluster this faucet is rate-limited; on a
-// local validator it always succeeds, which is why this test runs against a local validator.
+// FINALIZE, so the mint has rent + fees. Finalized, not merely confirmed, is the point: the
+// engine builds every transaction against the finalized blockhash and its preflight simulation
+// runs on the finalized bank, so a confirmed-but-not-finalized airdrop is invisible to the
+// first mint transaction and it fails with "no record of a prior credit". On a public cluster
+// this faucet is rate-limited; on a local validator it always succeeds, which is why this test
+// runs against a local validator.
 func fundPayer(ctx context.Context, t *testing.T, client *rpc.Client, pub solana.PublicKey) {
 	t.Helper()
-	if _, err := client.RequestAirdrop(ctx, pub, 2*solana.LAMPORTS_PER_SOL, rpc.CommitmentConfirmed); err != nil {
+	if _, err := client.RequestAirdrop(ctx, pub, 2*solana.LAMPORTS_PER_SOL, rpc.CommitmentFinalized); err != nil {
 		t.Fatalf("airdrop: %v", err)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for {
-		bal, err := client.GetBalance(ctx, pub, rpc.CommitmentConfirmed)
+		bal, err := client.GetBalance(ctx, pub, rpc.CommitmentFinalized)
 		if err == nil && bal.Value > 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("payer never funded (last err: %v)", err)
+			t.Fatalf("payer never funded to finalized (last err: %v)", err)
 		}
 		select {
 		case <-ctx.Done():
 			t.Fatalf("context expired waiting for airdrop: %v", ctx.Err())
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(time.Second):
 		}
 	}
 }
