@@ -1,0 +1,73 @@
+name: Localnet e2e
+
+# Mints a real fixed-supply SPL token on a local Solana validator and verifies on-chain that
+# the result is safe (both authorities revoked). This exercises the extension's resumable mint
+# session against real SPL + Metaplex metadata programs, driving each signature with a local
+# key that stands in for flynn core's vault-held signer, so serialization and commitment waits
+# are proven for real, not against a fake ledger. The build tag keeps it out of the fast CI
+# lane (ionalpha/go-ci) which has no validator; this job supplies one.
+on:
+  push:
+    branches: [main]
+    paths: ["token/**", "cmd/token/**", ".github/workflows/localnet.yml"]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["token/**", "cmd/token/**", ".github/workflows/localnet.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  localnet-mint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache: true
+
+      - name: Install Agave (Solana) CLI
+        # Pin to a channel URL for now, matching this repo's deliberate-pinning pattern
+        # (CI callers are pinned to a tag once the dependency cuts one). Bump to an exact
+        # release tag when reproducibility of the validator itself is required.
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Boot local validator (clone Metaplex metadata program from devnet)
+        run: |
+          solana-test-validator --reset --quiet \
+            --url https://api.devnet.solana.com \
+            --clone-upgradeable-program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s \
+            --ledger "$RUNNER_TEMP/test-ledger" --rpc-port 8899 \
+            > "$RUNNER_TEMP/validator.log" 2>&1 &
+          echo "TV_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if solana -u http://127.0.0.1:8899 cluster-version >/dev/null 2>&1; then
+              echo "validator up after $((i*2))s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "validator did not come up"; tail -50 "$RUNNER_TEMP/validator.log"; exit 1
+
+      - name: Confirm the metadata program is loaded
+        run: |
+          solana -u http://127.0.0.1:8899 account \
+            metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s | grep -iE "Owner|Executable"
+
+      - name: Mint + verify e2e
+        env:
+          FLYNN_LOCALNET_RPC: http://127.0.0.1:8899
+        run: go test -tags localnet ./token/ -run Localnet -v -count=1
+
+      - name: Stop validator
+        if: always()
+        run: kill "${TV_PID}" 2>/dev/null || true
+
+      - name: Validator log on failure
+        if: failure()
+        run: tail -100 "$RUNNER_TEMP/validator.log" || true

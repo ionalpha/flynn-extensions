@@ -7,9 +7,16 @@
 // launches it the same way. Diagnostics go to stderr so they never corrupt the protocol
 // stream on stdout.
 //
-// Configuration is read from the environment, never baked into the binary or a spec:
+// The Solana JSON-RPC endpoint is configured, in precedence order:
 //
-//	FLYNN_SOLANA_RPC   Solana JSON-RPC endpoint (defaults to devnet when unset).
+//	--rpc <url>        a fixed argument in the extension spec (the channel that survives the
+//	                   host sandbox, which scrubs the environment before launch).
+//	FLYNN_SOLANA_RPC   environment, honoured only for a bare/dev run outside the sandbox.
+//	(default)          Solana devnet.
+//
+// The endpoint is not a secret; a secret would reach the process through a scoped bridge,
+// never the command line. When run mounted by flynn the environment is empty, so a
+// deployment that needs a specific (mainnet, paid) endpoint sets it with --rpc in the spec.
 //
 // The signing key is NEVER held here. token_verify is read-only and needs no key. token_mint
 // builds the transactions and runs the safety policy but holds no key: each transaction's
@@ -23,6 +30,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -38,11 +46,14 @@ import (
 var version = "dev"
 
 func main() {
-	endpoint := os.Getenv("FLYNN_SOLANA_RPC")
-	if endpoint == "" {
-		endpoint = rpc.DevNet_RPC
-		fmt.Fprintln(os.Stderr, "token extension: FLYNN_SOLANA_RPC unset, defaulting to devnet")
+	fs := flag.NewFlagSet("token", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	rpcFlag := fs.String("rpc", "", "Solana JSON-RPC endpoint (overrides FLYNN_SOLANA_RPC; the sandbox scrubs env, so a mounted deployment sets the endpoint here)")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
 	}
+
+	endpoint := resolveEndpoint(*rpcFlag, os.Getenv("FLYNN_SOLANA_RPC"))
 	client := rpc.New(endpoint)
 
 	s := mcpserver.New("token", version)
@@ -52,6 +63,23 @@ func main() {
 	if err := s.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "token extension:", err)
 		os.Exit(1)
+	}
+}
+
+// resolveEndpoint picks the RPC endpoint in precedence order: the --rpc flag (the channel
+// that survives the host sandbox, which scrubs the environment), then FLYNN_SOLANA_RPC (a
+// bare/dev run outside the sandbox), then devnet. It logs which source won so a misconfigured
+// deployment is diagnosable from stderr without leaking anything secret (the endpoint is not).
+func resolveEndpoint(flagVal, envVal string) string {
+	switch {
+	case flagVal != "":
+		return flagVal
+	case envVal != "":
+		fmt.Fprintln(os.Stderr, "token extension: using FLYNN_SOLANA_RPC (no --rpc given)")
+		return envVal
+	default:
+		fmt.Fprintln(os.Stderr, "token extension: no --rpc or FLYNN_SOLANA_RPC, defaulting to devnet")
+		return rpc.DevNet_RPC
 	}
 }
 
