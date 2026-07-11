@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"sync"
 
-	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 
 	"github.com/ionalpha/flynn-extensions/mcpserver"
@@ -107,27 +106,27 @@ func (m *mintService) tool() mcpserver.Tool {
 		Name: "token_mint",
 		Description: "Mint a new fixed-supply SPL token safely on Solana: create the mint, attach metadata, " +
 			"mint the whole supply, then revoke the mint authority (freeze authority is never set). A scam-shaped " +
-			"request is refused. This is a signing choreography: start with {payer,name,symbol,metadataUri,decimals,supply} " +
-			"and the tool returns {session,sign:{pubkey,message}}; sign the message with the payer key and call again " +
-			"with {session,signature} until it returns {done,mint}. Report a signing failure with {session,signError}.",
+			"request is refused. Call it with {name,symbol,metadataUri,decimals,supply}; the mint's transactions are " +
+			"signed by the host with a key this tool never holds, so the call completes through the host's signing loop " +
+			"and returns {done,mint}.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
-			`"payer":{"type":"string"},"name":{"type":"string"},"symbol":{"type":"string"},"metadataUri":{"type":"string"},` +
-			`"decimals":{"type":"integer"},"supply":{"type":"integer"},` +
-			`"session":{"type":"string"},"signature":{"type":"string"},"signError":{"type":"string"}}}`),
+			`"name":{"type":"string"},"symbol":{"type":"string"},"metadataUri":{"type":"string"},` +
+			`"decimals":{"type":"integer"},"supply":{"type":"integer"}},` +
+			`"required":["name","symbol","metadataUri","supply"]}`),
 		Handler: m.handle,
 	}
 }
 
 func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (string, error) {
 	var a struct {
-		Payer       string          `json:"payer"`
+		HostKey     string          `json:"_hostKey"` // base64 of the host signing key's public bytes
 		Name        string          `json:"name"`
 		Symbol      string          `json:"symbol"`
 		MetadataURI string          `json:"metadataUri"`
 		Decimals    uint8           `json:"decimals"`
 		Supply      json.RawMessage `json:"supply"`
 		Session     string          `json:"session"`
-		Signature   string          `json:"signature"`
+		Signature   string          `json:"signature"` // base64 of the raw signature
 		SignError   string          `json:"signError"`
 	}
 	a.Decimals = 9
@@ -136,9 +135,12 @@ func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (stri
 	}
 
 	if a.Session == "" {
-		payer, err := token.ParsePubkey(a.Payer)
+		// The payer is the host's signing key, injected as its public bytes on the first call.
+		// This extension never holds the key; it only builds against the public half and hands
+		// each transaction back to the host to sign.
+		payer, err := token.ParsePubkeyBytes(a.HostKey)
 		if err != nil {
-			return "", fmt.Errorf("token_mint: bad payer address: %w", err)
+			return "", fmt.Errorf("token_mint: bad host key: %w", err)
 		}
 		supply, err := parseSupply(a.Supply)
 		if err != nil {
@@ -161,7 +163,7 @@ func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (stri
 	case a.SignError != "":
 		r.Err = errors.New(a.SignError)
 	default:
-		sig, err := solana.SignatureFromBase58(a.Signature)
+		sig, err := token.ParseSignatureBytes(a.Signature)
 		if err != nil {
 			return "", fmt.Errorf("token_mint: bad signature: %w", err)
 		}
@@ -199,7 +201,6 @@ func (m *mintService) render(id string, s *token.Session) (string, error) {
 	return marshal(map[string]any{
 		"session": id,
 		"sign": map[string]string{
-			"pubkey":  req.Pubkey.String(),
 			"message": base64.StdEncoding.EncodeToString(req.Message),
 		},
 	})

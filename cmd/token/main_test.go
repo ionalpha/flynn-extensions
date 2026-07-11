@@ -136,8 +136,9 @@ func (f mintFakeRPC) GetAccountInfoWithOpts(context.Context, solana.PublicKey, *
 func TestMintToolChoreography(t *testing.T) {
 	m := &mintService{client: mintFakeRPC{}, sessions: map[string]*token.Session{}}
 	payer := solana.NewWallet().PublicKey()
+	hostKey := base64.StdEncoding.EncodeToString(payer.Bytes())
 
-	start := `{"payer":"` + payer.String() + `","name":"Flynn","symbol":"FLYNN","metadataUri":"https://example.com/f.json","decimals":9,"supply":"1000000"}`
+	start := `{"_hostKey":"` + hostKey + `","name":"Flynn","symbol":"FLYNN","metadataUri":"https://example.com/f.json","decimals":9,"supply":"1000000"}`
 	out, err := m.handle(context.Background(), []byte(start))
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -145,7 +146,6 @@ func TestMintToolChoreography(t *testing.T) {
 	var first struct {
 		Session string `json:"session"`
 		Sign    struct {
-			Pubkey  string `json:"pubkey"`
 			Message string `json:"message"`
 		} `json:"sign"`
 	}
@@ -154,9 +154,6 @@ func TestMintToolChoreography(t *testing.T) {
 	}
 	if first.Session == "" {
 		t.Fatalf("start did not open a session: %s", out)
-	}
-	if first.Sign.Pubkey != payer.String() {
-		t.Fatalf("first signature requested for %s, not the payer %s", first.Sign.Pubkey, payer)
 	}
 	if _, derr := base64.StdEncoding.DecodeString(first.Sign.Message); derr != nil || first.Sign.Message == "" {
 		t.Fatalf("sign message is not base64 bytes: %q", first.Sign.Message)
@@ -186,8 +183,8 @@ func TestMintToolChoreography(t *testing.T) {
 // TestMintToolRejectsBadInput covers the parse/guard paths of the tool boundary.
 func TestMintToolRejectsBadInput(t *testing.T) {
 	m := &mintService{client: mintFakeRPC{}, sessions: map[string]*token.Session{}}
-	if _, err := m.handle(context.Background(), []byte(`{"payer":"not-a-key","supply":"1"}`)); err == nil {
-		t.Fatal("expected an error for a bad payer address")
+	if _, err := m.handle(context.Background(), []byte(`{"_hostKey":"not-base64!!","supply":"1"}`)); err == nil {
+		t.Fatal("expected an error for a bad host key")
 	}
 	if _, err := m.handle(context.Background(), []byte(`{"session":"nope","signature":"x"}`)); err == nil {
 		t.Fatal("expected an error for an unknown session")
