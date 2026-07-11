@@ -1,0 +1,20 @@
+name: CI
+
+# Thin caller: the actual gates live once in ionalpha/flynn-ci and run against this repo's
+# checked-out module, so lint/test/scan can never drift from the other ionalpha repos.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    # Pin this to a flynn-ci tag or commit SHA (and set ci-ref to match) once flynn-ci cuts
+    # releases, so a change to the shared CI is adopted deliberately, never silently.
+    uses: ionalpha/flynn-ci/.github/workflows/go-ci.yml@main
+    with:
+      ci-ref: main

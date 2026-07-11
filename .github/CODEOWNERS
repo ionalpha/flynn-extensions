@@ -1,0 +1,5 @@
+# Default owners for everything in the repo.
+* @ion-alpha-dev
+
+# CI wiring and security-relevant config require owner review.
+/.github/ @ion-alpha-dev
