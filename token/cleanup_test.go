@@ -60,7 +60,7 @@ func (f *fakeRPC) GetBlockHeight(_ context.Context, _ rpc.CommitmentType) (uint6
 	return f.blockHeight, nil
 }
 
-func (f *fakeRPC) SendTransaction(ctx context.Context, tx *solana.Transaction) (solana.Signature, error) {
+func (f *fakeRPC) SendTransactionWithOpts(ctx context.Context, tx *solana.Transaction, _ rpc.TransactionOpts) (solana.Signature, error) {
 	if err := ctx.Err(); err != nil {
 		return solana.Signature{}, err
 	}

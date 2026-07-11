@@ -36,7 +36,7 @@ func (fakeRPC) GetBlockHeight(context.Context, rpc.CommitmentType) (uint64, erro
 	return 0, errors.New("unexpected call")
 }
 
-func (fakeRPC) SendTransaction(context.Context, *solana.Transaction) (solana.Signature, error) {
+func (fakeRPC) SendTransactionWithOpts(context.Context, *solana.Transaction, rpc.TransactionOpts) (solana.Signature, error) {
 	return solana.Signature{}, errors.New("unexpected call")
 }
 
@@ -111,7 +111,7 @@ func (mintFakeRPC) GetLatestBlockhash(context.Context, rpc.CommitmentType) (*rpc
 	return &rpc.GetLatestBlockhashResult{Value: &rpc.LatestBlockhashResult{Blockhash: solana.Hash{1}, LastValidBlockHeight: 1000}}, nil
 }
 
-func (mintFakeRPC) SendTransaction(context.Context, *solana.Transaction) (solana.Signature, error) {
+func (mintFakeRPC) SendTransactionWithOpts(context.Context, *solana.Transaction, rpc.TransactionOpts) (solana.Signature, error) {
 	return solana.Signature{2}, nil
 }
 

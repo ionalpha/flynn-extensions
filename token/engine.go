@@ -70,7 +70,7 @@ var sysvarInstructions = solana.MustPublicKeyFromBase58("Sysvar1nstructions11111
 type RPCClient interface {
 	GetLatestBlockhash(ctx context.Context, commitment rpc.CommitmentType) (*rpc.GetLatestBlockhashResult, error)
 	GetBlockHeight(ctx context.Context, commitment rpc.CommitmentType) (uint64, error)
-	SendTransaction(ctx context.Context, tx *solana.Transaction) (solana.Signature, error)
+	SendTransactionWithOpts(ctx context.Context, tx *solana.Transaction, opts rpc.TransactionOpts) (solana.Signature, error)
 	GetSignatureStatuses(ctx context.Context, searchTransactionHistory bool, sigs ...solana.Signature) (*rpc.GetSignatureStatusesResult, error)
 	GetAccountInfoWithOpts(ctx context.Context, account solana.PublicKey, opts *rpc.GetAccountInfoOpts) (*rpc.GetAccountInfoResult, error)
 	GetMinimumBalanceForRentExemption(ctx context.Context, dataSize uint64, commitment rpc.CommitmentType) (uint64, error)
@@ -260,7 +260,15 @@ func (e *Engine) Verify(ctx context.Context, mint solana.PublicKey) (MintState, 
 // step (the mint-authority revoke) whose success is reported to the caller, so a confirmed
 // slot that is later forked out can never be mistaken for a permanent result.
 func (e *Engine) send(ctx context.Context, ixs []solana.Instruction, commitment rpc.CommitmentType, extra ...Signer) (solana.Signature, error) {
-	bh, err := e.rpc.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	// Build against a CONFIRMED blockhash (not finalized). Every step reads a fresh
+	// blockhash and preflights on the confirmed bank, so each instruction sees the accounts
+	// the prior confirmed step created (the mint before its metadata, the ATA before the
+	// mint-to). A finalized blockhash would preflight on the finalized bank, which lags our
+	// own confirmed writes by ~32 slots: the metadata step would then simulate against a bank
+	// where the just-created mint does not yet exist and Metaplex would panic decoding an
+	// empty account. The irreversible-step safety guarantee is unaffected: it comes from
+	// confirmOrExpire waiting for FINALIZED, not from the blockhash's commitment.
+	bh, err := e.rpc.GetLatestBlockhash(ctx, rpc.CommitmentConfirmed)
 	if err != nil {
 		return solana.Signature{}, fmt.Errorf("blockhash: %w", err)
 	}
@@ -300,7 +308,10 @@ func (e *Engine) send(ctx context.Context, ixs []solana.Instruction, commitment 
 	// that reached the node can still land, so the outcome is decided by watching the
 	// signature until it lands or its blockhash expires, never by the submit call.
 	sig := tx.Signatures[0]
-	_, sendErr := e.rpc.SendTransaction(ctx, tx)
+	// Preflight on the CONFIRMED bank so simulation sees the accounts our own prior confirmed
+	// steps created; the default (finalized) preflight lags those writes and would reject a
+	// valid tx (or panic a downstream program) on an account it cannot yet see.
+	_, sendErr := e.rpc.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{PreflightCommitment: rpc.CommitmentConfirmed})
 	switch cerr := e.confirmOrExpire(ctx, sig, bh.Value.LastValidBlockHeight, commitment); {
 	case cerr == nil:
 		return sig, nil
