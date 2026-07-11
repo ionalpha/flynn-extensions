@@ -20,6 +20,16 @@ builds:
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
+  - id: token
+    main: ./cmd/token
+    binary: token
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
 # One archive per extension binary per platform, named by the binary so a release lists
 # each extension's artifacts unambiguously. Windows ships a zip; the rest ship tar.gz.
 archives:
