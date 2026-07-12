@@ -19,10 +19,16 @@ func driveMint(t *testing.T, f *fakeRPC, payer solana.PrivateKey, spec MintSpec)
 		if out, done := s.Result(); done {
 			return out, seen
 		}
-		req, ok := s.Pending()
+		call, ok := s.Pending()
 		if !ok {
-			t.Fatal("session is neither done nor awaiting a signature")
+			t.Fatal("session is neither done nor awaiting the host")
 		}
+		// The fake ledger is injected, so the lifecycle borrows no network here and every host
+		// call it makes must be a signature request.
+		if call.Sign == nil {
+			t.Fatal("session parked on something other than a signature request")
+		}
+		req := *call.Sign
 		if !req.Pubkey.Equals(payer.PublicKey()) {
 			t.Fatalf("signature requested for %s, not the payer %s", req.Pubkey, payer.PublicKey())
 		}
@@ -36,7 +42,7 @@ func driveMint(t *testing.T, f *fakeRPC, payer solana.PrivateKey, spec MintSpec)
 			t.Fatal("driver signature does not verify against the emitted message")
 		}
 		seen = append(seen, req)
-		if err := s.Advance(SignResult{Signature: sig}); err != nil {
+		if err := s.Advance(HostReply{Signature: sig}); err != nil {
 			t.Fatalf("advance: %v", err)
 		}
 	}
@@ -82,12 +88,12 @@ func TestSessionDeliversSignFailure(t *testing.T) {
 	f := &fakeRPC{confirm: true, lastValid: 1000, mintData: revokedMintBytes(0, 9)}
 
 	s := startMint(f, payer.PublicKey(), spec, firingClock{})
-	req, ok := s.Pending()
+	call, ok := s.Pending()
 	if !ok {
 		t.Fatal("expected the first payer-signature request")
 	}
-	if !req.Pubkey.Equals(payer.PublicKey()) {
-		t.Fatalf("first request was for %s, not the payer", req.Pubkey)
+	if call.Sign == nil || !call.Sign.Pubkey.Equals(payer.PublicKey()) {
+		t.Fatal("the first host call was not a signature request for the payer")
 	}
 	// The first signature fails; every later request (an abort's revoke, if the engine needs
 	// one) is signed normally so the session can reach its terminal state.
@@ -96,17 +102,17 @@ func TestSessionDeliversSignFailure(t *testing.T) {
 		if _, done := s.Result(); done {
 			break
 		}
-		var r SignResult
+		var r HostReply
 		if fail {
-			r = SignResult{Err: errTestSignFailed}
+			r = HostReply{Err: errTestSignFailed}
 			fail = false
 		} else {
-			req, _ := s.Pending()
-			sig, err := payer.Sign(req.Message)
+			call, _ := s.Pending()
+			sig, err := payer.Sign(call.Sign.Message)
 			if err != nil {
 				t.Fatalf("sign: %v", err)
 			}
-			r = SignResult{Signature: sig}
+			r = HostReply{Signature: sig}
 		}
 		if err := s.Advance(r); err != nil {
 			t.Fatalf("advance: %v", err)
@@ -129,7 +135,7 @@ func TestSessionAdvanceAfterDoneIsRejected(t *testing.T) {
 	if _, done := s.Result(); !done {
 		t.Fatal("an up-front-invalid spec should complete the session immediately")
 	}
-	if err := s.Advance(SignResult{}); err == nil {
+	if err := s.Advance(HostReply{}); err == nil {
 		t.Fatal("advancing a completed session must be rejected")
 	}
 }

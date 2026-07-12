@@ -29,6 +29,11 @@ Extensions are designed to be at least as safe as in-process code. An extension:
 
 - **never holds a privileged secret.** For a signing capability it builds an unsigned
   request; a vault/hardware-backed signer in flynn core signs it.
+- **never holds the network.** An extension that must reach a service borrows core's: it hands
+  out the request bytes and core sends them to the endpoint the operator configured. The
+  extension names no destination, so it can be launched with egress fully denied. Prefer this
+  to requesting egress; an extension that requests egress cannot run on a platform that cannot
+  filter it per host.
 - runs **sandboxed and egress-locked** (no ambient filesystem/vault access; network egress is
   allow-listed, intersected with the operator grant).
 - has each tool **governed at flynn's dispatch waist**: capability-gated, budget/brake

@@ -16,9 +16,17 @@ It is more secure than compiling capabilities into the agent, not less:
 - **The extension never holds privileged secrets.** For signing capabilities (e.g. token),
   the extension builds an unsigned request and a vault/hardware-backed signer in trusted core
   signs it. A compromised extension cannot exfiltrate a key it never had.
+- **The extension never holds the network either.** An extension that needs to reach a service
+  does not get egress; it hands the request bytes to core, which sends them to the endpoint the
+  OPERATOR configured and returns the response. The extension names no destination and cannot
+  influence one, so there is nowhere for it to exfiltrate to and no internal service it can
+  reach. The token extension works this way: it runs with egress fully denied, on every platform
+  (including Windows, where per-host egress filtering does not exist, so an extension that
+  needed egress could not be launched at all).
 - **Sandboxed + egress-locked.** An extension process runs in flynn's containment ladder with
   no ambient filesystem/vault access, and its network egress is allow-listed (intersected
-  with the operator grant), not whatever the extension asks for.
+  with the operator grant), not whatever the extension asks for. Deny-by-default: an extension
+  that requests nothing reaches nothing.
 - **Governed like any tool.** Each mounted tool crosses the same dispatch waist: capability
   gated (default-deny), budget/brake-bounded, and recorded on the signed, replayable spine.
 - **Signed-only code.** Released extensions are cosign-verified against a pinned key; dev mode

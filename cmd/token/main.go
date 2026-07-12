@@ -1,28 +1,26 @@
 // Command token is the flynn token extension: an out-of-process MCP tool-server that
 // creates and verifies fixed-supply SPL tokens on Solana with an anti-scam safety policy.
-// flynn launches it as a sandboxed, egress-locked subprocess and mounts its tools
-// (namespaced, capability-gated, governed at the dispatch waist on the flynn side).
+// flynn launches it as a sandboxed subprocess and mounts its tools (namespaced,
+// capability-gated, governed at the dispatch waist on the flynn side).
 //
-// It speaks JSON-RPC over stdio: run it directly and it serves on stdin/stdout; flynn
-// launches it the same way. Diagnostics go to stderr so they never corrupt the protocol
-// stream on stdout.
+// It speaks JSON-RPC over stdio: run it directly and it serves on stdin/stdout; flynn launches
+// it the same way. Diagnostics go to stderr so they never corrupt the protocol stream on stdout.
 //
-// The Solana JSON-RPC endpoint is configured, in precedence order:
+// THIS PROCESS HOLDS NO KEY AND NO NETWORK.
 //
-//	--rpc <url>        a fixed argument in the extension spec (the channel that survives the
-//	                   host sandbox, which scrubs the environment before launch).
-//	FLYNN_SOLANA_RPC   environment, honoured only for a bare/dev run outside the sandbox.
-//	(default)          Solana devnet.
+// Neither authority a token mint needs lives here. The signing key stays in the flynn vault:
+// each transaction is built here against the key's PUBLIC half and handed to the host to sign,
+// so a compromised extension can never obtain or misuse it. The network stays with the host
+// too: this process has no RPC endpoint, no socket, and no way to name a destination. Every
+// Solana JSON-RPC request it makes is handed to the host as opaque bytes, and the host sends it
+// to the endpoint the OPERATOR configured and returns the response.
 //
-// The endpoint is not a secret; a secret would reach the process through a scoped bridge,
-// never the command line. When run mounted by flynn the environment is empty, so a
-// deployment that needs a specific (mainnet, paid) endpoint sets it with --rpc in the spec.
-//
-// The signing key is NEVER held here. token_verify is read-only and needs no key. token_mint
-// builds the transactions and runs the safety policy but holds no key: each transaction's
-// payer signature is produced by flynn core with a vault-held key and handed back over the
-// tool boundary (see the token package's Session). So a compromised extension can never obtain
-// or misuse the key.
+// So flynn launches this binary with egress fully denied, on every platform. There is no
+// address it can exfiltrate to, no internal service it can reach, and no way to redirect the
+// bytes it does send: the only thing that leaves is a request the host agreed to send, to the
+// one endpoint the host itself holds. That is why both tools below are resumable sessions
+// rather than plain calls: each one runs until it needs the host to sign or to send, hands out
+// the bytes, and continues when the host answers.
 package main
 
 import (
@@ -36,8 +34,6 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/gagliardetto/solana-go/rpc"
-
 	"github.com/ionalpha/flynn-extensions/mcpserver"
 	"github.com/ionalpha/flynn-extensions/token"
 )
@@ -48,17 +44,13 @@ var version = "dev"
 func main() {
 	fs := flag.NewFlagSet("token", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	rpcFlag := fs.String("rpc", "", "Solana JSON-RPC endpoint (overrides FLYNN_SOLANA_RPC; the sandbox scrubs env, so a mounted deployment sets the endpoint here)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
 
-	endpoint := resolveEndpoint(*rpcFlag, os.Getenv("FLYNN_SOLANA_RPC"))
-	client := rpc.New(endpoint)
-
 	s := mcpserver.New("token", version)
-	s.Register(verifyTool(token.NewEngine(client, nil)))
-	s.Register((&mintService{client: client, sessions: map[string]*token.Session{}}).tool())
+	s.Register(newVerifyService().tool())
+	s.Register(newMintService().tool())
 
 	if err := s.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "token extension:", err)
@@ -66,67 +58,193 @@ func main() {
 	}
 }
 
-// resolveEndpoint picks the RPC endpoint in precedence order: the --rpc flag (the channel
-// that survives the host sandbox, which scrubs the environment), then FLYNN_SOLANA_RPC (a
-// bare/dev run outside the sandbox), then devnet. It logs which source won so a misconfigured
-// deployment is diagnosable from stderr without leaking anything secret (the endpoint is not).
-func resolveEndpoint(flagVal, envVal string) string {
-	switch {
-	case flagVal != "":
-		return flagVal
-	case envVal != "":
-		fmt.Fprintln(os.Stderr, "token extension: using FLYNN_SOLANA_RPC (no --rpc given)")
-		return envVal
-	default:
-		fmt.Fprintln(os.Stderr, "token extension: no --rpc or FLYNN_SOLANA_RPC, defaulting to devnet")
-		return rpc.DevNet_RPC
-	}
-}
-
-// verifyTool reports a mint's scam-relevant state: supply, decimals, and whether the mint
-// and freeze authorities are revoked. A Token-2022 mint is reported as its own UNSAFE class
-// rather than a read failure, because it can carry transfer hooks, fees, or a permanent
-// delegate.
-func verifyTool(eng *token.Engine) mcpserver.Tool {
-	return mcpserver.Tool{
-		Name:        "token_verify",
-		Description: "Verify a Solana mint: report supply, decimals, and whether the mint and freeze authorities are revoked (a safe token has both revoked).",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"mint":{"type":"string"}},"required":["mint"]}`),
-		Handler: func(ctx context.Context, arguments json.RawMessage) (string, error) {
-			var a struct {
-				Mint string `json:"mint"`
-			}
-			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", fmt.Errorf("token_verify: bad input: %w", err)
-			}
-			pk, err := token.ParsePubkey(a.Mint)
-			if err != nil {
-				return "", fmt.Errorf("token_verify: bad mint address: %w", err)
-			}
-			st, err := eng.Verify(ctx, pk)
-			if err != nil {
-				if errors.Is(err, token.ErrToken2022Mint) {
-					return fmt.Sprintf("mint %s: UNSAFE - Token-2022 mint that may carry transfer hooks, transfer fees, or a permanent delegate; not a plain fixed-supply SPL mint", pk), nil
-				}
-				return "", err
-			}
-			return fmt.Sprintf("mint %s: supply=%d decimals=%d mintAuthorityRevoked=%t freezeAbsent=%t",
-				st.Mint, st.Supply, st.Decimals, st.SupplyFixed(), !st.Freezable()), nil
-		},
-	}
-}
-
-// mintService hosts token_mint. A mint is a resumable session: because the payer key lives in
-// flynn core, the tool cannot complete a mint in one call. The first call starts a session and
-// returns the first message core must sign; each later call delivers a signature and returns
-// the next message or the final outcome. The service holds the in-flight sessions between
-// calls. The mcpserver harness dispatches messages one at a time, so the map needs no locking
-// for correctness; the mutex guards against any future concurrent driver.
-type mintService struct {
-	client   token.RPCClient
+// sessionRegistry holds the lifecycles that are in flight between calls. Because neither tool
+// can complete in one call (each must pause for the host to sign or to send), a tool call
+// returns a host-call message carrying a session id, and the next call resumes that session.
+// The mcpserver harness dispatches messages one at a time, so the map needs no locking for
+// correctness; the mutex guards against any future concurrent driver.
+type sessionRegistry[S any] struct {
+	prefix   string
 	mu       sync.Mutex
 	seq      uint64
-	sessions map[string]*token.Session
+	sessions map[string]*S
+}
+
+func newRegistry[S any](prefix string) *sessionRegistry[S] {
+	return &sessionRegistry[S]{prefix: prefix, sessions: map[string]*S{}}
+}
+
+func (r *sessionRegistry[S]) store(s *S) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	id := r.prefix + strconv.FormatUint(r.seq, 10)
+	r.sessions[id] = s
+	return id
+}
+
+func (r *sessionRegistry[S]) get(id string) *S {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[id]
+}
+
+func (r *sessionRegistry[S]) remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sessions, id)
+}
+
+// resumeArgs is the half of a tool's input that carries the host's answer to the outstanding
+// host call: the session to resume, and exactly one of a signature, a response body, or the
+// error the host hit producing either.
+type resumeArgs struct {
+	Session   string `json:"session"`
+	Signature string `json:"signature"`  // base64 of the raw signature
+	SignError string `json:"signError"`  // the host could not sign
+	Response  string `json:"response"`   // base64 of the fetch response body
+	FetchErr  string `json:"fetchError"` // the host could not send
+}
+
+// reply turns the host's answer into the HostReply the lifecycle is waiting for. An error from
+// the host is delivered INTO the lifecycle rather than returned to the caller, so the engine's
+// own failure path runs: a mint that cannot sign or cannot reach the network still unwinds
+// (revoking anything it already created) instead of being cut off mid-flight.
+func (a resumeArgs) reply() (token.HostReply, error) {
+	switch {
+	case a.SignError != "":
+		return token.HostReply{Err: errors.New(a.SignError)}, nil
+	case a.FetchErr != "":
+		return token.HostReply{Err: errors.New(a.FetchErr)}, nil
+	case a.Response != "":
+		body, err := base64.StdEncoding.DecodeString(a.Response)
+		if err != nil {
+			return token.HostReply{}, fmt.Errorf("bad response: %w", err)
+		}
+		return token.HostReply{Body: body}, nil
+	default:
+		sig, err := token.ParseSignatureBytes(a.Signature)
+		if err != nil {
+			return token.HostReply{}, fmt.Errorf("bad signature: %w", err)
+		}
+		return token.HostReply{Signature: sig}, nil
+	}
+}
+
+// pendingReply renders the session's outstanding host call as the tool's JSON reply: the bytes
+// the host must sign, or the request body it must send. The host reads only these opaque bytes;
+// it never learns what they mean, and it is never told where to send them (it holds the
+// endpoint itself).
+func pendingReply(id string, call token.HostCall) (string, error) {
+	switch {
+	case call.Sign != nil:
+		return marshal(map[string]any{
+			"session": id,
+			"sign":    map[string]string{"message": base64.StdEncoding.EncodeToString(call.Sign.Message)},
+		})
+	case call.Fetch != nil:
+		return marshal(map[string]any{
+			"session": id,
+			"fetch":   map[string]string{"body": base64.StdEncoding.EncodeToString(call.Fetch.Body)},
+		})
+	default:
+		return "", fmt.Errorf("session %q parked on an empty host call", id)
+	}
+}
+
+// verifyService hosts token_verify: a read-only report of a mint's scam-relevant state. It needs
+// no key, but it does need the network, so it is a session like a mint: each RPC read crosses
+// back to the host to be sent.
+type verifyService struct {
+	reg *sessionRegistry[token.VerifySession]
+}
+
+func newVerifyService() *verifyService {
+	return &verifyService{reg: newRegistry[token.VerifySession]("verify-")}
+}
+
+func (v *verifyService) tool() mcpserver.Tool {
+	return mcpserver.Tool{
+		Name: "token_verify",
+		Description: "Verify a Solana mint: report supply, decimals, and whether the mint and freeze authorities " +
+			"are revoked (a safe token has both revoked). The chain is read through the host, which holds the RPC " +
+			"endpoint, so the call completes through the host's fetch loop.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"mint":{"type":"string"}}}`),
+		Handler:     v.handle,
+	}
+}
+
+func (v *verifyService) handle(_ context.Context, arguments json.RawMessage) (string, error) {
+	var a struct {
+		resumeArgs
+		Mint string `json:"mint"`
+	}
+	if err := json.Unmarshal(arguments, &a); err != nil {
+		return "", fmt.Errorf("token_verify: bad input: %w", err)
+	}
+
+	if a.Session == "" {
+		pk, err := token.ParsePubkey(a.Mint)
+		if err != nil {
+			return "", fmt.Errorf("token_verify: bad mint address: %w", err)
+		}
+		s := token.StartVerify(pk)
+		return v.render(v.reg.store(s), s)
+	}
+
+	s := v.reg.get(a.Session)
+	if s == nil {
+		return "", fmt.Errorf("token_verify: unknown session %q", a.Session)
+	}
+	r, err := a.reply()
+	if err != nil {
+		return "", fmt.Errorf("token_verify: %w", err)
+	}
+	if err := s.Advance(r); err != nil {
+		v.reg.remove(a.Session)
+		return "", fmt.Errorf("token_verify: %w", err)
+	}
+	return v.render(a.Session, s)
+}
+
+// render turns the verify session's current state into the tool's JSON reply: the next host call,
+// or the final report. A Token-2022 mint is reported as its own UNSAFE class rather than a read
+// failure, because it can carry transfer hooks, fees, or a permanent delegate.
+func (v *verifyService) render(id string, s *token.VerifySession) (string, error) {
+	if out, done := s.Result(); done {
+		v.reg.remove(id)
+		if out.Err != nil {
+			if errors.Is(out.Err, token.ErrToken2022Mint) {
+				return fmt.Sprintf("mint %s: UNSAFE - Token-2022 mint that may carry transfer hooks, transfer fees, "+
+					"or a permanent delegate; not a plain fixed-supply SPL mint", out.State.Mint), nil
+			}
+			return "", out.Err
+		}
+		st := out.State
+		return fmt.Sprintf("mint %s: supply=%d decimals=%d mintAuthorityRevoked=%t freezeAbsent=%t",
+			st.Mint, st.Supply, st.Decimals, st.SupplyFixed(), !st.Freezable()), nil
+	}
+	call, ok := s.Pending()
+	if !ok {
+		return "", fmt.Errorf("token_verify: session %q is neither done nor awaiting the host", id)
+	}
+	return pendingReply(id, call)
+}
+
+// mintService hosts token_mint. A mint is a resumable session: the payer key lives in the flynn
+// vault and the RPC endpoint lives with the host, so the tool cannot complete a mint in one call.
+// The first call starts a session and returns the first thing the host must do; each later call
+// delivers the host's answer and returns the next host call or the final outcome.
+type mintService struct {
+	reg *sessionRegistry[token.Session]
+	// opts configure each session this service starts. Production passes none, so a mint polls
+	// for confirmation on the system clock; a test passes its own clock so it does not sleep in
+	// real time while driving the choreography.
+	opts []token.MintOption
+}
+
+func newMintService(opts ...token.MintOption) *mintService {
+	return &mintService{reg: newRegistry[token.Session]("mint-"), opts: opts}
 }
 
 func (m *mintService) tool() mcpserver.Tool {
@@ -134,28 +252,25 @@ func (m *mintService) tool() mcpserver.Tool {
 		Name: "token_mint",
 		Description: "Mint a new fixed-supply SPL token safely on Solana: create the mint, attach metadata, " +
 			"mint the whole supply, then revoke the mint authority (freeze authority is never set). A scam-shaped " +
-			"request is refused. Call it with {name,symbol,metadataUri,decimals,supply}; the mint's transactions are " +
-			"signed by the host with a key this tool never holds, so the call completes through the host's signing loop " +
-			"and returns {done,mint}.",
+			"request is refused. Call it with {name,symbol,metadataUri,decimals,supply}; the transactions are signed " +
+			"by the host with a key this tool never holds and submitted through the host's RPC endpoint, so the call " +
+			"completes through the host's call loop and returns {done,mint}.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
 			`"name":{"type":"string"},"symbol":{"type":"string"},"metadataUri":{"type":"string"},` +
-			`"decimals":{"type":"integer"},"supply":{"type":"integer"}},` +
-			`"required":["name","symbol","metadataUri","supply"]}`),
+			`"decimals":{"type":"integer"},"supply":{"type":"integer"}}}`),
 		Handler: m.handle,
 	}
 }
 
 func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (string, error) {
 	var a struct {
+		resumeArgs
 		HostKey     string          `json:"_hostKey"` // base64 of the host signing key's public bytes
 		Name        string          `json:"name"`
 		Symbol      string          `json:"symbol"`
 		MetadataURI string          `json:"metadataUri"`
 		Decimals    uint8           `json:"decimals"`
 		Supply      json.RawMessage `json:"supply"`
-		Session     string          `json:"session"`
-		Signature   string          `json:"signature"` // base64 of the raw signature
-		SignError   string          `json:"signError"`
 	}
 	a.Decimals = 9
 	if err := json.Unmarshal(arguments, &a); err != nil {
@@ -174,41 +289,32 @@ func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (stri
 		if err != nil {
 			return "", fmt.Errorf("token_mint: %w", err)
 		}
-		s := token.StartMint(m.client, payer, token.MintSpec{
+		s := token.StartMint(payer, token.MintSpec{
 			Name: a.Name, Symbol: a.Symbol, MetadataURI: a.MetadataURI, Decimals: a.Decimals, Supply: supply,
-		})
-		return m.render(m.store(s), s)
+		}, m.opts...)
+		return m.render(m.reg.store(s), s)
 	}
 
-	m.mu.Lock()
-	s := m.sessions[a.Session]
-	m.mu.Unlock()
+	s := m.reg.get(a.Session)
 	if s == nil {
 		return "", fmt.Errorf("token_mint: unknown session %q", a.Session)
 	}
-	var r token.SignResult
-	switch {
-	case a.SignError != "":
-		r.Err = errors.New(a.SignError)
-	default:
-		sig, err := token.ParseSignatureBytes(a.Signature)
-		if err != nil {
-			return "", fmt.Errorf("token_mint: bad signature: %w", err)
-		}
-		r.Signature = sig
+	r, err := a.reply()
+	if err != nil {
+		return "", fmt.Errorf("token_mint: %w", err)
 	}
 	if err := s.Advance(r); err != nil {
-		m.remove(a.Session)
+		m.reg.remove(a.Session)
 		return "", fmt.Errorf("token_mint: %w", err)
 	}
 	return m.render(a.Session, s)
 }
 
-// render turns the session's current state into the tool's JSON reply: the next message to
-// sign, or the final outcome. A completed session is dropped from the registry.
+// render turns the mint session's current state into the tool's JSON reply: the next host call,
+// or the final outcome. A completed session is dropped from the registry.
 func (m *mintService) render(id string, s *token.Session) (string, error) {
 	if out, done := s.Result(); done {
-		m.remove(id)
+		m.reg.remove(id)
 		resp := map[string]any{"done": true, "mint": out.Mint.String()}
 		if out.Err != nil {
 			resp["error"] = out.Err.Error()
@@ -222,37 +328,17 @@ func (m *mintService) render(id string, s *token.Session) (string, error) {
 		}
 		return marshal(resp)
 	}
-	req, ok := s.Pending()
+	call, ok := s.Pending()
 	if !ok {
-		return "", fmt.Errorf("token_mint: session %q is neither done nor awaiting a signature", id)
+		return "", fmt.Errorf("token_mint: session %q is neither done nor awaiting the host", id)
 	}
-	return marshal(map[string]any{
-		"session": id,
-		"sign": map[string]string{
-			"message": base64.StdEncoding.EncodeToString(req.Message),
-		},
-	})
-}
-
-func (m *mintService) store(s *token.Session) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.seq++
-	id := "mint-" + strconv.FormatUint(m.seq, 10)
-	m.sessions[id] = s
-	return id
-}
-
-func (m *mintService) remove(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.sessions, id)
+	return pendingReply(id, call)
 }
 
 func marshal(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("token_mint: encode reply: %w", err)
+		return "", fmt.Errorf("token: encode reply: %w", err)
 	}
 	return string(b), nil
 }

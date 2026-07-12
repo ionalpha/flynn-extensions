@@ -13,12 +13,21 @@
 //	  --clone-upgradeable-program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s
 //	FLYNN_LOCALNET_RPC=http://127.0.0.1:8899 go test -tags localnet ./token/ -run Localnet -v
 //
-// The payer key here stands in for flynn core's vault-held signer: the session hands out each
-// message and the test signs it with the payer key, exactly as core does over the tool boundary.
+// The test plays flynn core on BOTH borrowed authorities, exactly as core does over the tool
+// boundary. The payer key stands in for core's vault-held signer: the session hands out each
+// message and the test signs it. The endpoint stands in for core's HostFetcher: the session
+// hands out each JSON-RPC request body and the test POSTs it. The session itself holds neither,
+// which is what makes this test possible at all against a LOOPBACK validator: the extension
+// never dials anything, so netguard's deny-loopback rule (which applies to an extension's own
+// egress) is not in the path. Under flynn, core sends these same bytes through a HostFetcher
+// granted the validator's address.
 package token_test
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -56,39 +65,55 @@ func TestLocalnetMint(t *testing.T) {
 		Supply:      wholeSupply,
 	}
 
-	// Drive the resumable session to completion, signing each message with the payer key.
-	// This is the exact loop flynn core's process handler runs, minus the sandbox boundary.
-	sess := token.StartMint(client, payer.PublicKey(), spec)
+	// Drive the resumable session to completion, servicing every host call it makes: signing each
+	// message with the payer key, and sending each JSON-RPC request to the validator. This is the
+	// exact loop flynn core's process handler runs, minus the sandbox boundary. The session is
+	// given no client and no endpoint, so if any of this leaked back into the extension the mint
+	// simply could not proceed.
+	sess := token.StartMint(payer.PublicKey(), spec)
 	defer sess.Close()
 
-	signs := 0
+	signs, fetches := 0, 0
 	var mint solana.PublicKey
 	for {
 		if out, done := sess.Result(); done {
 			if out.Err != nil {
-				t.Fatalf("mint failed after %d signatures: %v", signs, out.Err)
+				t.Fatalf("mint failed after %d signatures and %d fetches: %v", signs, fetches, out.Err)
 			}
 			mint = out.Mint
 			break
 		}
-		req, ok := sess.Pending()
+		call, ok := sess.Pending()
 		if !ok {
-			t.Fatal("session is neither done nor awaiting a signature")
+			t.Fatal("session is neither done nor awaiting the host")
 		}
-		sig, err := payer.Sign(req.Message)
-		if err != nil {
-			t.Fatalf("sign request %d: %v", signs, err)
+		var reply token.HostReply
+		switch {
+		case call.Sign != nil:
+			sig, err := payer.Sign(call.Sign.Message)
+			if err != nil {
+				t.Fatalf("sign request %d: %v", signs, err)
+			}
+			signs++
+			if signs > 8 {
+				t.Fatalf("mint requested more than 8 signatures (%d); the choreography should be bounded", signs)
+			}
+			reply = token.HostReply{Signature: sig}
+		case call.Fetch != nil:
+			fetches++
+			body, err := hostFetch(ctx, endpoint, call.Fetch.Body)
+			// A fetch failure is delivered INTO the session (not fatal here) so the engine's own
+			// failure path runs, which is what core does too.
+			reply = token.HostReply{Body: body, Err: err}
+		default:
+			t.Fatal("session parked on an empty host call")
 		}
-		signs++
-		if signs > 8 {
-			t.Fatalf("mint requested more than 8 signatures (%d); the choreography should be bounded", signs)
-		}
-		if err := sess.Advance(token.SignResult{Signature: sig}); err != nil {
-			t.Fatalf("advance after signature %d: %v", signs, err)
+		if err := sess.Advance(reply); err != nil {
+			t.Fatalf("advance after %d signatures / %d fetches: %v", signs, fetches, err)
 		}
 	}
 
-	t.Logf("minted %s in %d payer signatures", mint, signs)
+	t.Logf("minted %s in %d payer signatures and %d host fetches", mint, signs, fetches)
 
 	// Verify on-chain that the freshly minted token is a safe, fixed-supply SPL mint: both the
 	// mint and freeze authorities revoked, decimals as requested, and the whole supply present.
@@ -142,4 +167,21 @@ func fundPayer(ctx context.Context, t *testing.T, client *rpc.Client, pub solana
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// hostFetch plays flynn core's HostFetcher: it POSTs the request body the extension handed out to
+// the endpoint CORE holds, and returns the response body. The extension never names this address;
+// it only ever hands out bytes.
+func hostFetch(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Body.Close() }()
+	return io.ReadAll(res.Body)
 }
