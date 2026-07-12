@@ -88,33 +88,82 @@ func TestUnknownNetworkIsTreatedAsLive(t *testing.T) {
 	}
 }
 
-// TestClassifyEndpointFailsSafe proves the endpoint classifier is asymmetric on purpose: only
-// a host that identifies itself as a test cluster is treated as one. A private mainnet RPC
-// (Helius, Triton, a bare IP) does not contain the word "mainnet", so a classifier that
-// looked for it would hand an attacker the whole supply.
-func TestClassifyEndpointFailsSafe(t *testing.T) {
+// TestClassifyGenesisFailsSafe proves the cluster classifier is asymmetric on purpose: only a
+// chain that identifies itself as a test cluster is treated as one. Everything else is real
+// money, including a chain that could not be identified at all.
+func TestClassifyGenesisFailsSafe(t *testing.T) {
 	live := []string{
-		"https://mainnet.helius-rpc.com/?api-key=x", // a real mainnet RPC
-		"https://example-rpc.provider.io",           // says nothing about itself
-		"http://10.0.0.7:8899",                      // a bare private IP
-		"",                                          // nothing at all
-		"::::not a url::::",                         // unparseable
+		mainnetGenesis, // the real thing
+		"",             // no answer at all
+		"not a hash",   // an answer that means nothing
+		"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N8d", // one character off the mainnet hash
+		"7PGRfLLBnDUPzeCoZ2ZczNwvJbLu6bMV2rLcfDwUJZbi", // a local validator's random genesis
 	}
-	for _, e := range live {
-		if got := ClassifyEndpoint(e); !got.Live() {
-			t.Errorf("ClassifyEndpoint(%q) = %s, which is not live: an unrecognised endpoint must be treated as real money", e, got)
+	for _, h := range live {
+		if got := ClassifyGenesis(h); !got.Live() {
+			t.Errorf("ClassifyGenesis(%q) = %s, which is not live: an unidentified chain must be treated as real money", h, got)
 		}
 	}
-	tests := map[string]Network{
-		"https://api.devnet.solana.com":  Devnet,
-		"https://api.testnet.solana.com": Testnet,
-		"http://127.0.0.1:8899":          Localnet,
-		"http://localhost:8899":          Localnet,
-	}
-	for endpoint, want := range tests {
-		if got := ClassifyEndpoint(endpoint); got != want {
-			t.Errorf("ClassifyEndpoint(%q) = %s, want %s", endpoint, got, want)
+	for hash, want := range map[string]Network{
+		devnetGenesis:  Devnet,
+		testnetGenesis: Testnet,
+		mainnetGenesis: Mainnet,
+	} {
+		if got := ClassifyGenesis(hash); got != want {
+			t.Errorf("ClassifyGenesis(%q) = %s, want %s", hash, got, want)
 		}
+	}
+}
+
+// TestTheClusterIsReadFromTheChainNotTheEndpoint is the reason the classifier keys on the
+// genesis hash. Whoever configures the host chooses the RPC URL, and an endpoint named
+// "devnet" can serve mainnet. If the cluster were taken from that name, pointing flynn at
+// such an endpoint would relax the custody rules on real money and mint the entire supply
+// into a hot key. The engine asks the chain instead, so the name buys the attacker nothing.
+func TestTheClusterIsReadFromTheChainNotTheEndpoint(t *testing.T) {
+	// A node reached through a "devnet"-looking endpoint that is in fact mainnet. The engine
+	// is given no network, exactly as production gives it none.
+	f := &fakeRPC{confirm: true, lastValid: 1000, genesis: mainnetGenesis}
+	e := NewEngine(f, testPayer())
+	e.clk = firingClock{}
+
+	// No treasury: on a test cluster this is allowed and the payer keeps the supply.
+	_, _, err := e.Mint(context.Background(), custodySpec(solana.PublicKey{}))
+	if err == nil {
+		t.Fatal("minted the whole supply into the payer's hot key on mainnet: the endpoint's name was believed over the chain")
+	}
+	if !strings.Contains(err.Error(), "hot_key_treasury") {
+		t.Fatalf("refused, but not for the custody reason: %v", err)
+	}
+}
+
+// The other direction, and the one that proves the engine really asks the chain rather than
+// falling back on its strict default: an engine given no network at all, talking to a node
+// whose genesis hash is devnet's, may mint without a treasury. If the genesis call were not
+// made, this engine would still be on Mainnet and the mint would be refused.
+func TestADevnetChainIsRecognisedWithoutBeingTold(t *testing.T) {
+	f := &fakeRPC{confirm: true, lastValid: 1000, genesis: devnetGenesis, mintData: revokedMintBytes(scaled(1_000_000, 9), 9)}
+	e := NewEngine(f, testPayer())
+	e.clk = firingClock{}
+
+	if _, _, err := e.Mint(context.Background(), custodySpec(solana.PublicKey{})); err != nil {
+		t.Fatalf("a devnet mint with no treasury must be allowed, and the chain said devnet: %v", err)
+	}
+	if e.net != Devnet {
+		t.Errorf("engine settled on network %q, want %q", e.net, Devnet)
+	}
+}
+
+// A chain that cannot be identified is real money until proven otherwise. An RPC that fails
+// the genesis call must not become a way to escape the treasury requirement.
+func TestAnUnidentifiableChainIsTreatedAsMainnet(t *testing.T) {
+	f := &fakeRPC{confirm: true, lastValid: 1000, genesisErr: true}
+	e := NewEngine(f, testPayer())
+	e.clk = firingClock{}
+
+	_, _, err := e.Mint(context.Background(), custodySpec(solana.PublicKey{}))
+	if err == nil || !strings.Contains(err.Error(), "hot_key_treasury") {
+		t.Fatalf("a chain that would not say what it is must be held to mainnet custody rules; got %v", err)
 	}
 }
 

@@ -28,6 +28,8 @@ const setAuthorityDiscriminator = 6
 // fakeRPC is a controllable RPCClient. It respects context cancellation the way a real
 // client does, so a detached cleanup context is observably different from a canceled one.
 type fakeRPC struct {
+	genesis            string             // GetGenesisHash reports this; empty = devnet
+	genesisErr         bool               // GetGenesisHash fails, so the cluster cannot be identified
 	confirm            bool               // GetSignatureStatuses reports the signature confirmed
 	unconfirmRevoke    bool               // once a revoke is submitted its confirmation never arrives
 	lastValid          uint64             // GetLatestBlockhash reports this last-valid block height
@@ -61,6 +63,20 @@ func (f *fakeRPC) GetLatestBlockhash(ctx context.Context, _ rpc.CommitmentType) 
 
 func (f *fakeRPC) GetBlockHeight(_ context.Context, _ rpc.CommitmentType) (uint64, error) {
 	return f.blockHeight, nil
+}
+
+// GetGenesisHash answers the engine's question about which cluster it is on. The zero value
+// answers devnet, because that is what the tests here mint against; a test that wants the
+// real-money path sets genesis to the mainnet hash, or genesisErr to be unidentifiable.
+func (f *fakeRPC) GetGenesisHash(_ context.Context) (solana.Hash, error) {
+	if f.genesisErr {
+		return solana.Hash{}, errors.New("rpc: genesis hash unavailable")
+	}
+	h := f.genesis
+	if h == "" {
+		h = devnetGenesis
+	}
+	return solana.MustHashFromBase58(h), nil
 }
 
 func (f *fakeRPC) SendTransactionWithOpts(ctx context.Context, tx *solana.Transaction, _ rpc.TransactionOpts) (solana.Signature, error) {

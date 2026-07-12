@@ -71,36 +71,40 @@ func (n Network) Live() bool {
 	}
 }
 
-// ClassifyEndpoint names the network an RPC endpoint belongs to.
-//
-// It is deliberately asymmetric: a host is only called a test cluster when it says so.
-// Anything else - a bare IP, a private RPC provider, a proxy, an unparseable string - is
-// classified Mainnet, because the failure modes are not symmetric. Mistaking mainnet for
-// devnet mints real supply into a hot key; mistaking devnet for mainnet merely demands a
-// treasury address that the operator can supply anyway. So the unknown case fails toward
-// refusal. This is also why the check does not look for "mainnet" in the host: most real
-// mainnet RPCs (Helius, Triton, QuickNode, a self-hosted validator) never contain the word.
-func ClassifyEndpoint(endpoint string) Network {
-	host := endpoint
-	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
-		host = u.Host
-	}
-	host = strings.ToLower(host)
-	if h, _, ok := strings.Cut(host, ":"); ok {
-		host = h
-	}
+// The genesis hash of each of Solana's public clusters. A cluster's genesis block is the one
+// thing about it that cannot be renamed, proxied, or pointed somewhere else: it is the root
+// the chain is built on, and every node on that cluster reports the same value.
+const (
+	mainnetGenesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+	devnetGenesis  = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+	testnetGenesis = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+)
 
-	// Loopback: a local validator. Bare "localhost"/127.0.0.1 with no scheme parses as a
-	// path, not a host, so this is checked against the raw string too.
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-		return Localnet
-	}
-	// Solana's own clusters name themselves, as do most test-cluster proxies.
-	switch {
-	case strings.Contains(host, "devnet"):
+// ClassifyGenesis names the network a genesis hash belongs to.
+//
+// The cluster is read from the chain rather than from the endpoint it was reached through,
+// because an endpoint's name is chosen by whoever supplies it and the genesis hash is not. An
+// RPC URL with "devnet" in it can serve mainnet, and a classifier that trusted the name would
+// hand that operator the whole supply of a real token in a single hot key. Asking the chain
+// what chain it is closes that: to be relieved of the treasury requirement, a cluster now has
+// to actually be devnet or testnet.
+//
+// It stays asymmetric. Only a hash we recognise as a test cluster relaxes anything; every
+// other value, including the empty string, an unreachable node, and the random genesis of a
+// freshly created local validator, comes out Mainnet. The failure modes are not symmetric:
+// mistaking mainnet for devnet mints real supply into a hot key, while mistaking devnet for
+// mainnet merely demands a treasury address the operator can supply anyway. A local validator
+// is a cluster nobody can identify from the outside, so it is named by the caller (OnNetwork),
+// never inferred.
+func ClassifyGenesis(hash string) Network {
+	switch strings.TrimSpace(hash) {
+	case devnetGenesis:
 		return Devnet
-	case strings.Contains(host, "testnet"):
+	case testnetGenesis:
 		return Testnet
+	case mainnetGenesis:
+		return Mainnet
+	default:
+		return Mainnet
 	}
-	return Mainnet
 }

@@ -79,6 +79,7 @@ type RPCClient interface {
 	GetSignatureStatuses(ctx context.Context, searchTransactionHistory bool, sigs ...solana.Signature) (*rpc.GetSignatureStatusesResult, error)
 	GetAccountInfoWithOpts(ctx context.Context, account solana.PublicKey, opts *rpc.GetAccountInfoOpts) (*rpc.GetAccountInfoResult, error)
 	GetMinimumBalanceForRentExemption(ctx context.Context, dataSize uint64, commitment rpc.CommitmentType) (uint64, error)
+	GetGenesisHash(ctx context.Context) (solana.Hash, error)
 }
 
 // Signer authorizes transactions by signing a serialized message. Every method is
@@ -105,6 +106,10 @@ type Engine struct {
 	payer Signer
 	clk   clock.Timing
 	net   Network
+	// netPinned records that a caller named the cluster, so the engine must not ask the chain.
+	// A local validator cannot be identified from its genesis hash (it is random at creation),
+	// so naming it is the only way; everything else is read from the chain.
+	netPinned bool
 }
 
 // NewEngine builds an engine over an RPC client and a payer/authority signer.
@@ -125,7 +130,29 @@ type Option func(*Engine)
 
 // WithNetwork declares which cluster the engine runs against. It does not change what is
 // safe; it changes how much custody rigour is demanded (see safety.TokenPlan.LiveNetwork).
-func WithNetwork(n Network) Option { return func(e *Engine) { e.net = n } }
+func WithNetwork(n Network) Option {
+	return func(e *Engine) { e.net, e.netPinned = n, true }
+}
+
+// resolveNetwork establishes which cluster the engine is on by asking the chain for its genesis
+// hash. It runs before the safety policy, because the answer is what decides whether the whole
+// supply may be minted into the payer's own hot key.
+//
+// Every outcome that is not a recognised test cluster leaves the engine on Mainnet: a node that
+// cannot be reached, a chain that does not know itself, a cluster nobody has heard of. Failing
+// to identify the network is not a reason to relax the rules that protect real money, so the
+// error is not returned - it simply means the strict path.
+func (e *Engine) resolveNetwork(ctx context.Context) {
+	if e.netPinned {
+		return
+	}
+	h, err := e.rpc.GetGenesisHash(ctx)
+	if err != nil {
+		e.net = Mainnet
+		return
+	}
+	e.net = ClassifyGenesis(h.String())
+}
 
 // MintState is the observable, verifiable state of a mint.
 type MintState struct {

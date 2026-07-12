@@ -92,6 +92,9 @@ func (e *Engine) Mint(ctx context.Context, s MintSpec) (solana.PublicKey, []safe
 	if err := validateMetadata(s.Name, s.Symbol, s.MetadataURI); err != nil {
 		return solana.PublicKey{}, nil, err
 	}
+	// Ask the chain which chain it is. This has to happen before the policy runs, because the
+	// answer is what decides whether this mint is allowed to put the whole supply in a hot key.
+	e.resolveNetwork(ctx)
 	if _, err := scaledAmount(s.Supply, s.Decimals); err != nil {
 		return solana.PublicKey{}, nil, err
 	}

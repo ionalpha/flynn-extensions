@@ -1,40 +1,33 @@
 package token
 
 import (
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
-// FuzzClassifyEndpoint throws arbitrary strings at the network classifier. This decides
-// whether a mint is held to real-money custody rules, so its one inviolable property is the
-// fail-safe direction: whatever it returns must never be Live()==false unless the input is
-// actually one of the known test-cluster forms. A crash or a wrong "not live" on a mainnet
-// endpoint would hand an attacker the supply, so the fuzzer asserts that anything not
-// recognisably a test cluster classifies as live.
-func FuzzClassifyEndpoint(f *testing.F) {
+// FuzzClassifyGenesis throws arbitrary strings at the cluster classifier. This decides whether
+// a mint is held to real-money custody rules, so its one inviolable property is the fail-safe
+// direction: nothing but an exact known test-cluster genesis hash may come out non-live. A
+// crash, or a "not live" answer for anything else, would hand an attacker the supply.
+func FuzzClassifyGenesis(f *testing.F) {
 	for _, s := range []string{
-		"", "https://api.devnet.solana.com", "http://127.0.0.1:8899",
-		"https://mainnet.helius-rpc.com", "devnet", "not a url", "://", "http://",
-		"HTTPS://API.DEVNET.SOLANA.COM", "https://x.testnet.foo/devnet",
+		"", " ", "not a hash", mainnetGenesis, devnetGenesis, testnetGenesis,
+		strings.ToLower(devnetGenesis), devnetGenesis + "x", " " + devnetGenesis + " ",
+		"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N8d",
 	} {
 		f.Add(s)
 	}
-	f.Fuzz(func(t *testing.T, endpoint string) {
-		n := ClassifyEndpoint(endpoint) // must never panic
-		// The only non-live outputs are the three named test clusters. Everything else,
-		// including anything the parser could not make sense of, must be live.
+	f.Fuzz(func(t *testing.T, hash string) {
+		n := ClassifyGenesis(hash) // must never panic
+		if !n.Live() && strings.TrimSpace(hash) != devnetGenesis && strings.TrimSpace(hash) != testnetGenesis {
+			t.Fatalf("%q classified as %s, which is not live: only an exact test-cluster genesis hash may relax the custody rules", hash, n)
+		}
 		switch n {
-		case Devnet, Testnet, Localnet:
-			if n.Live() {
-				t.Fatalf("%q classified as %s but Live() is true", endpoint, n)
-			}
-		case Mainnet:
-			if !n.Live() {
-				t.Fatalf("mainnet classification is not live")
-			}
+		case Devnet, Testnet, Mainnet:
 		default:
-			t.Fatalf("%q produced an unknown network %q", endpoint, n)
+			t.Fatalf("%q produced an unexpected network %q", hash, n)
 		}
 	})
 }
