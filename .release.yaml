@@ -1,0 +1,32 @@
+# What flynn-extensions ships.
+#
+# Each extension is released on its own timeline, tagged "<name>/vX.Y.Z", so an extension
+# that has not changed never gets a new version because a sibling did, and a host that
+# pinned one does not have to re-verify the others. Pushing the tag builds, signs and
+# publishes exactly that extension.
+#
+# Adding a cmd/<name> without an entry here fails CI: a new extension must not be able to
+# ship unversioned and unsigned by accident. relkit (in ionalpha/go-ci) reads this file.
+version: 1
+
+defaults:
+  # An extension is a subprocess a host launches, so it ships for every platform the host
+  # runs on, statically linked, with no toolchain of the build machine inside it.
+  goos: [linux, darwin, windows]
+  goarch: [amd64, arm64]
+  env: ["CGO_ENABLED=0"]
+  ldflags: ["-s", "-w"]
+
+  # Stamped with the tag's version, which the extension then reports to the host over MCP,
+  # so the version a host sees is the release it actually downloaded.
+  version_var: main.version
+
+  extra_files: [LICENSE, NOTICE]
+
+components:
+  # The minimal MCP tool-server: the worked example an extension author copies.
+  - name: example
+
+  # Mints and manages SPL tokens on Solana, holding neither a signing key nor network
+  # egress of its own.
+  - name: token

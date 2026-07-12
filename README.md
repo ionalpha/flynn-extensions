@@ -31,8 +31,9 @@ It is more secure than compiling capabilities into the agent, not less:
 | `mcpserver/` | The shared harness: an MCP stdio server. An extension registers `Tool`s and calls `Serve`; the harness handles all protocol framing. |
 | `cmd/example/` | A minimal extension (one echo tool) that shows the shape. Copy it to start a new extension. |
 
-Each extension is its own `cmd/<name>/` binary. CI builds every command; releases publish
-signed per-OS/arch binaries per extension.
+Each extension is its own `cmd/<name>/` binary, declared in [`.release.yaml`](.release.yaml)
+and released on its own timeline. CI builds every command and fails if one is not declared,
+so an extension cannot ship unversioned or unsigned.
 
 ## Writing an extension
 
@@ -57,35 +58,51 @@ is only ever honoured when dev mode is turned on.
 
 ## Releases
 
-A tag (`v*`) publishes a GitHub release with one archive per extension for every supported
-platform (Linux, macOS, and Windows on amd64 and arm64), a `checksums.txt` over them, a
-detached cosign signature and certificate for that checksum file, an SBOM per archive, and a
-build-provenance attestation. Signing is keyless (Sigstore/OIDC), so there is no long-lived
-key to manage: a downloader verifies the checksums, and so every artifact they cover, against
-the release workflow's identity.
-
-Verify a download:
+Each extension is released on its own timeline. The tag names it:
 
 ```
-cosign verify-blob \
-  --certificate checksums.txt.pem \
+token/v0.1.0      releases the token extension, and nothing else
+example/v0.2.0    releases the example extension, and nothing else
+```
+
+An extension that has not changed never gets a new version because a sibling did, and a host
+that pinned one does not have to re-verify the others.
+
+A tag publishes a GitHub release holding, for that one extension: an archive per platform
+(Linux, macOS and Windows, on amd64 and arm64), an SBOM per archive, a `checksums.txt` over
+all of them, a detached cosign signature and certificate for that checksum file, and a
+build-provenance attestation.
+
+Archives are reproducible: two builds of the same commit are byte-identical, so anyone can
+rebuild a tag and confirm the digests the signature covers are the ones this source actually
+produces. Signing is keyless (Sigstore/OIDC), so there is no long-lived key to manage.
+
+Verify a download. Every release's notes carry this command with the exact identity that
+signed it; the signing identity is the **reusable release workflow** in `ionalpha/go-ci`,
+which is what Sigstore binds a reusable workflow's signature to:
+
+```sh
+cosign verify-blob checksums.txt \
   --signature checksums.txt.sig \
-  --certificate-identity-regexp '^https://github.com/ionalpha/flynn-extensions' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  checksums.txt
+  --certificate checksums.txt.pem \
+  --certificate-identity-regexp '^https://github\.com/ionalpha/go-ci/\.github/workflows/monorepo-release\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
 sha256sum --check --ignore-missing checksums.txt
 gh attestation verify <archive> --repo ionalpha/flynn-extensions
 ```
 
-flynn does this verification for you when it installs a released extension; the commands
-above are for verifying a manual download.
+flynn does this verification for you when it installs a released extension; the commands above
+are for verifying a manual download.
 
 ## Standards
 
 CI runs via the shared [ionalpha/go-ci](https://github.com/ionalpha/go-ci) reusable
 workflow (gofumpt/goimports, a strict golangci-lint set, race tests on Linux/macOS/Windows,
 `govulncheck`, and a full-history secret scan). The same bar as flynn core, defined once.
-Releases are built and signed by the pinned `release` workflow.
+Releases are built and signed by the shared `monorepo-release` workflow in that same repo,
+which reads `.release.yaml` and scopes each extension by its real import graph: a fix to a
+shared package appears in the changelog of every extension that imports it, and no others.
 
 ## Status
 

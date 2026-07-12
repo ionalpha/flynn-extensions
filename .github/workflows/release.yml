@@ -1,66 +1,23 @@
 name: Release
 
+# One extension, on its own timeline. The tag names it: "token/v0.1.0" releases the token
+# extension and nothing else. The job lives in ionalpha/go-ci so every ionalpha repo that
+# ships binaries releases them the same way, and the rules cannot drift between repos.
 on:
   push:
-    tags: ["v*"]
+    tags: ["*/v*"] # <extension>/vX.Y.Z
 
 permissions:
   contents: read
 
 jobs:
-  goreleaser:
-    runs-on: ubuntu-latest
+  release:
+    uses: ionalpha/go-ci/.github/workflows/monorepo-release.yml@main
     permissions:
-      contents: write # create the GitHub release and upload assets
+      contents: write # create the release and upload its assets
       id-token: write # keyless cosign signing via OIDC
-      attestations: write # write SLSA build provenance attestations
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: "1.26"
-          check-latest: true
-          cache: true
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          # Pin cosign to the 2.x line. cosign 3 makes the new bundle format the default,
-          # which ignores the --output-signature/--output-certificate flags the signing
-          # step uses to emit the detached checksums.txt.sig and .pem a downloader verifies.
-          cosign-release: "v2.6.3"
-      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          # Pin syft so an SBOM tool upgrade cannot change or break the release.
-          syft-version: "v1.46.0"
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
-        with:
-          # Pin the goreleaser binary to an exact version, not a floating "~> v2", so the
-          # release is reproducible and a new v2.x cannot change its behavior under a tag.
-          # Bump this deliberately, never automatically.
-          version: "v2.17.0"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Attest build provenance
-        id: attest
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          # Attest the distributable archives GoReleaser produced: a signed, verifiable
-          # statement that these artifacts were built from this commit by this workflow,
-          # checkable with `gh attestation verify`.
-          subject-path: |
-            dist/*.tar.gz
-            dist/*.zip
-      - name: Attach provenance to the release
-        # attest-build-provenance stores the attestation in GitHub's attestation store,
-        # which the OpenSSF Scorecard signed-releases check does not read. It scans release
-        # assets by name, so attach the provenance bundle as a *.intoto.jsonl asset for it
-        # (and any downstream verifier) to find.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: |
-          cp "$BUNDLE" flynn-extensions.intoto.jsonl
-          gh release upload "$TAG" flynn-extensions.intoto.jsonl --clobber
+      attestations: write # SLSA build provenance
+    with:
+      # Pinned to the same ref as the workflow above, so the release tool and the workflow
+      # that runs it move together.
+      ci-ref: main

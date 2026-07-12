@@ -18,3 +18,12 @@ jobs:
     uses: ionalpha/go-ci/.github/workflows/go-ci.yml@main
     with:
       ci-ref: main
+
+  # The release manifest is what a tag will trust, so it is checked on the PR that changes
+  # it rather than at tag time, when a mistake means a broken release. It also reports
+  # which extensions a branch would oblige us to release, including the ones pulled in
+  # through a shared package nobody touched directly.
+  manifest:
+    uses: ionalpha/go-ci/.github/workflows/monorepo-check.yml@main
+    with:
+      ci-ref: main
