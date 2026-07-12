@@ -112,6 +112,13 @@ Releases are built and signed by the shared `monorepo-release` workflow in that 
 which reads `.release.yaml` and scopes each extension by its real import graph: a fix to a
 shared package appears in the changelog of every extension that imports it, and no others.
 
+Two tracked hooks (`.githooks/`) guard who a change is recorded as. `dev/authorcheck` refuses a
+commit whose author is not the pinned identity, and `dev/pushcheck` refuses a push that would
+not go through the pinned SSH host, because git identity and SSH identity are different things:
+a correctly-authored commit pushed over the wrong key is still attributed to that key's account
+by GitHub. Both are unset by default, so an outside contributor commits under their own name and
+pushes to their own fork, as they should.
+
 ## Status
 
 Bootstrapping. This drop is the MCP-server harness, the example extension, the CI wiring, and

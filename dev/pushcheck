@@ -1,0 +1,67 @@
+#!/usr/bin/env sh
+# Refuse to push over a transport that would authenticate as the wrong account.
+#
+# Pinning the commit author (dev/authorcheck) is not enough. Git identity and SSH
+# identity are separate things: a commit can say "Ion Alpha" while the push that
+# carries it authenticates with whatever key the transport picked. GitHub then
+# attributes the *actions* to that key's account, so the pushes, the merge, and the
+# branch deletion are all recorded under the wrong user even though every commit
+# reads correctly. That has already happened once, and nothing in git warned about
+# it, because from git's point of view nothing was wrong.
+#
+# So the transport is pinned too. hooks.remoteHost names the SSH host alias every
+# push must go through, e.g.
+#
+#     git config hooks.remoteHost github-ionalpha
+#
+# with the alias bound to the right key in ~/.ssh/config:
+#
+#     Host github-ionalpha
+#         HostName github.com
+#         IdentityFile ~/.ssh/id_ed25519_org
+#         IdentitiesOnly yes
+#
+# Unset by default, in which case this does nothing: an outside contributor pushes
+# to their own fork over whatever transport they like.
+#
+# The URL checked is the *effective* one (git ls-remote --get-url), so any
+# url.<base>.insteadOf rewrite in the caller's config is applied first. That way a
+# remote recorded as git@github.com:org/repo.git passes when a rewrite rule sends
+# it through the pinned alias, and fails when nothing does.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+
+want="$(git config --get hooks.remoteHost || true)"
+[ -n "$want" ] || exit 0
+
+remote="${1:-origin}"
+url="$(git ls-remote --get-url "$remote")"
+
+case "$url" in
+  "$want":* | *"@$want":* | ssh://*"$want"/*)
+    exit 0
+    ;;
+esac
+
+cat >&2 <<EOF
+pushcheck: refusing to push to "$remote".
+
+  effective URL: $url
+  required host: $want
+
+This URL does not go through the pinned SSH host alias, so the push would
+authenticate as whatever key "$(printf '%s' "$url" | sed -n 's|^\([^/:]*\).*|\1|p')"
+resolves to, and GitHub would attribute the push, the merge, and any branch
+deletion to that account, no matter what the commits say.
+
+Point the remote at the alias:
+
+    git remote set-url $remote $want:<org>/<repo>.git
+
+or, to fix it for every clone at once (including ones made by "gh repo clone",
+which writes a plain github.com URL), rewrite the org's URLs globally:
+
+    git config --global url."$want:<org>/".insteadOf "git@github.com:<org>/"
+    git config --global url."$want:<org>/".insteadOf "https://github.com/<org>/"
+EOF
+exit 1
