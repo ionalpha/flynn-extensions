@@ -28,27 +28,28 @@ const setAuthorityDiscriminator = 6
 // fakeRPC is a controllable RPCClient. It respects context cancellation the way a real
 // client does, so a detached cleanup context is observably different from a canceled one.
 type fakeRPC struct {
-	confirm           bool               // GetSignatureStatuses reports the signature confirmed
-	unconfirmRevoke   bool               // once a revoke is submitted its confirmation never arrives
-	lastValid         uint64             // GetLatestBlockhash reports this last-valid block height
-	blockHeight       uint64             // GetBlockHeight reports this height (> lastValid means expired)
-	cancelOnSend      int                // 1-based send index at which to cancel ctx (outcome unknown)
-	cancel            context.CancelFunc // called when cancelOnSend fires
-	failSendAt        int                // 1-based send index whose SendTransaction errors
-	accountInfoErr    bool               // GetAccountInfo returns a transient error
-	accountInfoOKFor  int                // the first N GetAccountInfo calls succeed before accountInfoErr applies
-	accountInfoCalls  int
-	accountOwner      solana.PublicKey // owner GetAccountInfo reports; zero = SPL Token program
-	mintData          []byte           // account bytes GetAccountInfo returns; nil = zeroed placeholder
-	revokeExpireFor   int              // the first N revoke submissions expire (never confirm)
-	sigStatusErr      bool             // GetSignatureStatuses returns a transient error (status unreadable)
-	confirmedOnly     bool             // landed signatures report "confirmed" but never reach "finalized"
-	cancelAfterStatus int              // cancel the context after this many status polls (0 disables)
-	sendCount         int
-	revokeSends       int
-	statusCalls       int
-	revokeSubmitted   bool                // a SetAuthority (revoke) transaction reached SendTransaction
-	lastTx            *solana.Transaction // the last transaction submitted, for instruction-level assertions
+	confirm            bool               // GetSignatureStatuses reports the signature confirmed
+	unconfirmRevoke    bool               // once a revoke is submitted its confirmation never arrives
+	lastValid          uint64             // GetLatestBlockhash reports this last-valid block height
+	blockHeight        uint64             // GetBlockHeight reports this height (> lastValid means expired)
+	cancelOnSend       int                // 1-based send index at which to cancel ctx (outcome unknown)
+	cancel             context.CancelFunc // called when cancelOnSend fires
+	failSendAt         int                // 1-based send index whose SendTransaction errors
+	accountInfoErr     bool               // GetAccountInfo returns a transient error
+	accountNotFoundFor int                // the first N GetAccountInfo calls report rpc.ErrNotFound (an absent account)
+	accountInfoOKFor   int                // the first N GetAccountInfo calls succeed before accountInfoErr applies
+	accountInfoCalls   int
+	accountOwner       solana.PublicKey // owner GetAccountInfo reports; zero = SPL Token program
+	mintData           []byte           // account bytes GetAccountInfo returns; nil = zeroed placeholder
+	revokeExpireFor    int              // the first N revoke submissions expire (never confirm)
+	sigStatusErr       bool             // GetSignatureStatuses returns a transient error (status unreadable)
+	confirmedOnly      bool             // landed signatures report "confirmed" but never reach "finalized"
+	cancelAfterStatus  int              // cancel the context after this many status polls (0 disables)
+	sendCount          int
+	revokeSends        int
+	statusCalls        int
+	revokeSubmitted    bool                // a SetAuthority (revoke) transaction reached SendTransaction
+	lastTx             *solana.Transaction // the last transaction submitted, for instruction-level assertions
 }
 
 func (f *fakeRPC) GetLatestBlockhash(ctx context.Context, _ rpc.CommitmentType) (*rpc.GetLatestBlockhashResult, error) {
@@ -119,6 +120,9 @@ func (f *fakeRPC) GetSignatureStatuses(_ context.Context, _ bool, _ ...solana.Si
 
 func (f *fakeRPC) GetAccountInfoWithOpts(_ context.Context, _ solana.PublicKey, _ *rpc.GetAccountInfoOpts) (*rpc.GetAccountInfoResult, error) {
 	f.accountInfoCalls++
+	if f.accountInfoCalls <= f.accountNotFoundFor {
+		return nil, rpc.ErrNotFound
+	}
 	if f.accountInfoErr && f.accountInfoCalls > f.accountInfoOKFor {
 		return nil, errors.New("rpc: 429 too many requests")
 	}

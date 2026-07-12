@@ -209,3 +209,20 @@ func TestContentAddressedURIs(t *testing.T) {
 		}
 	}
 }
+
+// TestFreshTreasuryIsAllowed is the regression for a bug the live devnet attack suite caught:
+// a treasury that does not exist on-chain yet (a fresh wallet, or a brand-new Squads vault)
+// is reported by the real RPC as rpc.ErrNotFound, an error, not a null value. An earlier
+// version of the spendability guard treated that error as "could not check" and refused the
+// mint, which would have blocked the exact multisig-vault case the feature exists to support.
+// The absent treasury is the normal case and must be allowed.
+func TestFreshTreasuryIsAllowed(t *testing.T) {
+	f := &fakeRPC{
+		confirm: true, lastValid: 1000, accountNotFoundFor: 1, // only the treasury pre-check is absent; the mint exists after minting
+		mintData: revokedMintBytes(scaled(1_000_000, 9), 9),
+	}
+	e := custodyEngine(f, Mainnet)
+	if _, _, err := e.Mint(context.Background(), custodySpec(solana.NewWallet().PublicKey())); err != nil {
+		t.Fatalf("a treasury that does not exist on-chain yet was refused: %v", err)
+	}
+}

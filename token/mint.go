@@ -59,14 +59,18 @@ func (e *Engine) treasury(s MintSpec) solana.PublicKey {
 // what an unfunded vault (and any fresh wallet) looks like.
 func (e *Engine) checkTreasurySpendable(ctx context.Context, treasury solana.PublicKey) error {
 	info, err := e.rpc.GetAccountInfoWithOpts(ctx, treasury, &rpc.GetAccountInfoOpts{Commitment: rpc.CommitmentFinalized})
-	if err != nil {
-		// Solana reports a non-existent account as a null value, not an error, so a real
-		// error here means the check could not be performed. Do not mint on an unproven
-		// treasury: the failure this guards against is unrecoverable.
-		return fmt.Errorf("treasury %s could not be checked before minting to it: %w", treasury, err)
+	if errors.Is(err, rpc.ErrNotFound) || (err == nil && (info == nil || info.Value == nil)) {
+		// The account does not exist yet. That is the NORMAL case for a treasury: a fresh
+		// wallet, and a brand-new Squads vault, are both off-chain until something funds
+		// them. The RPC reports this either as ErrNotFound or as a null value depending on
+		// the client, and both mean the same safe thing. A vault that does not exist yet
+		// cannot be a config account, which is the only shape this guard refuses.
+		return nil
 	}
-	if info == nil || info.Value == nil {
-		return nil // does not exist yet: an ordinary fresh wallet or an unfunded vault
+	if err != nil {
+		// A real error (not "absent"): the check could not be performed. Do not mint on an
+		// unproven treasury, because the failure this guards against is unrecoverable.
+		return fmt.Errorf("treasury %s could not be checked before minting to it: %w", treasury, err)
 	}
 	if info.Value.Owner.Equals(SquadsV4ProgramID) {
 		return fmt.Errorf("treasury %s is a Squads multisig CONFIG account, not its vault: tokens sent here can never be spent by anyone, because Squads only ever signs as the vault. Use the vault address (Squads shows it as the vault/treasury; it is derived from seeds [\"multisig\", %s, \"vault\", index])", treasury, treasury)
