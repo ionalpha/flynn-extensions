@@ -1,0 +1,9 @@
+# 2026/07/13 01:36:29.554768 [TestScaledAmountNeverPanics] [rapid] draw whole: 0x0
+# 2026/07/13 01:36:29.554768 [TestScaledAmountNeverPanics] [rapid] draw decimals: 0x14
+# 2026/07/13 01:36:29.554768 [TestScaledAmountNeverPanics] scaledAmount returned success for a scale factor that itself overflows (whole=0 decimals=20)
+# 
+v0.4.8#2959800320801828168
+0x0
+0x0
+0xc05c654ab866b
+0x14
