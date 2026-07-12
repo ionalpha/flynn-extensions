@@ -203,7 +203,7 @@ func scaled(whole uint64, decimals uint8) uint64 {
 }
 
 func safeSpec() MintSpec {
-	return MintSpec{Name: "Flynn", Symbol: "FLYNN", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1}
+	return MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1}
 }
 
 // TestMintHappyPathSucceeds guards the success path: every step confirms, and the on-chain

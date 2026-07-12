@@ -13,7 +13,7 @@ func TestImpersonationTarget(t *testing.T) {
 		{"Totally Legit", "usdc", "USDC"}, // symbol match, case-insensitive
 		{"tether", "XYZ", "USDT"},         // name match
 		{" Solana ", "X", "Solana"},       // trims whitespace
-		{"Flynn", "FLYNN", ""},            // our own token is not a protected brand
+		{"Acme", "ACME", ""},              // an unrelated brand is not protected
 		{"Random Coin", "RND", ""},        // no match
 		{"", "", ""},                      // empty
 

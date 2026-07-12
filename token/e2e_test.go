@@ -24,7 +24,7 @@ func TestE2EMintOnDevnet(t *testing.T) {
 	}
 	e := NewEngine(rpc.New(rpc.DevNet_RPC), KeySigner{Key: payerKey})
 
-	spec := MintSpec{Name: "Flynn", Symbol: "FLYNN", MetadataURI: "https://flynnhq.com/flynn-token.json", Decimals: 9, Supply: 1_000_000_000}
+	spec := MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1_000_000_000}
 	mint, disclosures, err := e.Mint(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("mint: %v", err)

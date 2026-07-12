@@ -216,8 +216,8 @@ func TestMintToolChoreography(t *testing.T) {
 	hostKey := base64.StdEncoding.EncodeToString(payer.PublicKey().Bytes())
 
 	m := newMintService(token.WithClock(firingClock{}))
-	start := `{"_hostKey":"` + hostKey + `","name":"Flynn","symbol":"FLYNN",` +
-		`"metadataUri":"https://example.com/f.json","decimals":9,"supply":"1000000"}`
+	start := `{"_hostKey":"` + hostKey + `","name":"Example Token","symbol":"EXMP",` +
+		`"metadataUri":"https://example.com/token.json","decimals":9,"supply":"1000000"}`
 	out := drive(t, m.handle, node, payer, start, "")
 
 	var done struct {
@@ -254,8 +254,8 @@ func TestMintToolDeliversSignFailure(t *testing.T) {
 	hostKey := base64.StdEncoding.EncodeToString(payer.PublicKey().Bytes())
 
 	m := newMintService(token.WithClock(firingClock{}))
-	start := `{"_hostKey":"` + hostKey + `","name":"Flynn","symbol":"FLYNN",` +
-		`"metadataUri":"https://example.com/f.json","decimals":9,"supply":"1000000"}`
+	start := `{"_hostKey":"` + hostKey + `","name":"Example Token","symbol":"EXMP",` +
+		`"metadataUri":"https://example.com/token.json","decimals":9,"supply":"1000000"}`
 	out := drive(t, m.handle, node, payer, start, "vault unavailable")
 
 	var done struct {

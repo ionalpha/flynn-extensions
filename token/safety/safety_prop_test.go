@@ -26,7 +26,7 @@ func drawPlan(t *rapid.T) TokenPlan {
 		GuaranteedYield:          rapid.Bool().Draw(t, "yield"),
 		IssuerProfitClaim:        rapid.Bool().Draw(t, "profit"),
 		CreatorSupplyPct:         rapid.Uint8Range(0, 100).Draw(t, "creatorPct"),
-		Impersonates:             rapid.SampledFrom([]string{"", "USDC", "Flynn"}).Draw(t, "impersonates"),
+		Impersonates:             rapid.SampledFrom([]string{"", "USDC", "Acme"}).Draw(t, "impersonates"),
 	}
 }
 

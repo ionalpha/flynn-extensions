@@ -54,7 +54,7 @@ func driveMint(t *testing.T, f *fakeRPC, payer solana.PrivateKey, spec MintSpec)
 // signs each one. The extension process holds no payer key at any point.
 func TestSessionDrivesFullMint(t *testing.T) {
 	payer := testPayer().Key
-	spec := MintSpec{Name: "Flynn", Symbol: "FLYNN", MetadataURI: "https://example.com/f.json", Decimals: 9, Supply: 1_000_000}
+	spec := MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1_000_000}
 	// A ledger where every transaction confirms, and the mint reads back revoked with the
 	// requested supply so the lifecycle returns a clean success.
 	f := &fakeRPC{
@@ -84,7 +84,7 @@ func TestSessionDrivesFullMint(t *testing.T) {
 // back revoked (authority None) so the abort's safety check is satisfied without a live revoke.
 func TestSessionDeliversSignFailure(t *testing.T) {
 	payer := testPayer().Key
-	spec := MintSpec{Name: "Flynn", Symbol: "FLYNN", MetadataURI: "https://example.com/f.json", Decimals: 9, Supply: 1_000_000}
+	spec := MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1_000_000}
 	f := &fakeRPC{confirm: true, lastValid: 1000, mintData: revokedMintBytes(0, 9)}
 
 	s := startMint(f, payer.PublicKey(), spec, firingClock{})

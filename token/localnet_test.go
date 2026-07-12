@@ -58,9 +58,9 @@ func TestLocalnetMint(t *testing.T) {
 
 	const wholeSupply = 1_000_000
 	spec := token.MintSpec{
-		Name:        "Flynn Localnet",
-		Symbol:      "FLN",
-		MetadataURI: "https://example.com/fln.json",
+		Name:        "Example Localnet",
+		Symbol:      "EXLN",
+		MetadataURI: "https://example.com/exln.json",
 		Decimals:    9,
 		Supply:      wholeSupply,
 	}
