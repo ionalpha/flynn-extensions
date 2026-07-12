@@ -97,7 +97,16 @@ cosign verify-blob checksums.txt \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 sha256sum --check --ignore-missing checksums.txt
-gh attestation verify <archive> --repo ionalpha/flynn-extensions
+```
+
+Each archive also carries SLSA build provenance. `--signer-repo` is required: the release is
+built by a reusable workflow in `ionalpha/go-ci`, so that is the identity Sigstore binds the
+signature to, and `gh` rejects the attestation as untrusted without it.
+
+```sh
+gh attestation verify <archive> \
+  --repo ionalpha/flynn-extensions \
+  --signer-repo ionalpha/go-ci
 ```
 
 flynn does this verification for you when it installs a released extension; the commands above
