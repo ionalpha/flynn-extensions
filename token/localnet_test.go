@@ -70,7 +70,7 @@ func TestLocalnetMint(t *testing.T) {
 	// exact loop flynn core's process handler runs, minus the sandbox boundary. The session is
 	// given no client and no endpoint, so if any of this leaked back into the extension the mint
 	// simply could not proceed.
-	sess := token.StartMint(payer.PublicKey(), spec)
+	sess := token.StartMint(payer.PublicKey(), spec, token.OnNetwork(token.Localnet))
 	defer sess.Close()
 
 	signs, fetches := 0, 0
@@ -117,7 +117,7 @@ func TestLocalnetMint(t *testing.T) {
 
 	// Verify on-chain that the freshly minted token is a safe, fixed-supply SPL mint: both the
 	// mint and freeze authorities revoked, decimals as requested, and the whole supply present.
-	eng := token.NewEngine(client, nil)
+	eng := token.NewEngine(client, nil, token.WithNetwork(token.Localnet))
 	st, err := eng.Verify(ctx, mint)
 	if err != nil {
 		t.Fatalf("verify %s: %v", mint, err)

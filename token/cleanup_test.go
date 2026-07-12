@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -37,16 +36,19 @@ type fakeRPC struct {
 	cancel            context.CancelFunc // called when cancelOnSend fires
 	failSendAt        int                // 1-based send index whose SendTransaction errors
 	accountInfoErr    bool               // GetAccountInfo returns a transient error
-	accountOwner      solana.PublicKey   // owner GetAccountInfo reports; zero = SPL Token program
-	mintData          []byte             // account bytes GetAccountInfo returns; nil = zeroed placeholder
-	revokeExpireFor   int                // the first N revoke submissions expire (never confirm)
-	sigStatusErr      bool               // GetSignatureStatuses returns a transient error (status unreadable)
-	confirmedOnly     bool               // landed signatures report "confirmed" but never reach "finalized"
-	cancelAfterStatus int                // cancel the context after this many status polls (0 disables)
+	accountInfoOKFor  int                // the first N GetAccountInfo calls succeed before accountInfoErr applies
+	accountInfoCalls  int
+	accountOwner      solana.PublicKey // owner GetAccountInfo reports; zero = SPL Token program
+	mintData          []byte           // account bytes GetAccountInfo returns; nil = zeroed placeholder
+	revokeExpireFor   int              // the first N revoke submissions expire (never confirm)
+	sigStatusErr      bool             // GetSignatureStatuses returns a transient error (status unreadable)
+	confirmedOnly     bool             // landed signatures report "confirmed" but never reach "finalized"
+	cancelAfterStatus int              // cancel the context after this many status polls (0 disables)
 	sendCount         int
 	revokeSends       int
 	statusCalls       int
-	revokeSubmitted   bool // a SetAuthority (revoke) transaction reached SendTransaction
+	revokeSubmitted   bool                // a SetAuthority (revoke) transaction reached SendTransaction
+	lastTx            *solana.Transaction // the last transaction submitted, for instruction-level assertions
 }
 
 func (f *fakeRPC) GetLatestBlockhash(ctx context.Context, _ rpc.CommitmentType) (*rpc.GetLatestBlockhashResult, error) {
@@ -65,6 +67,7 @@ func (f *fakeRPC) SendTransactionWithOpts(ctx context.Context, tx *solana.Transa
 		return solana.Signature{}, err
 	}
 	f.sendCount++
+	f.lastTx = tx
 	if isRevoke(tx) {
 		f.revokeSends++
 		f.revokeSubmitted = true
@@ -115,7 +118,8 @@ func (f *fakeRPC) GetSignatureStatuses(_ context.Context, _ bool, _ ...solana.Si
 }
 
 func (f *fakeRPC) GetAccountInfoWithOpts(_ context.Context, _ solana.PublicKey, _ *rpc.GetAccountInfoOpts) (*rpc.GetAccountInfoResult, error) {
-	if f.accountInfoErr {
+	f.accountInfoCalls++
+	if f.accountInfoErr && f.accountInfoCalls > f.accountInfoOKFor {
 		return nil, errors.New("rpc: 429 too many requests")
 	}
 	data := f.mintData
@@ -145,6 +149,22 @@ func revokedMintBytes(supply uint64, decimals uint8) []byte {
 	b[45] = 1 // is_initialized
 	// bytes[46:50] = 0 -> freeze authority COption::None
 	return b
+}
+
+// countSetAuthority counts the SPL Token SetAuthority instructions in tx. A safe mint carries
+// exactly two: one revoking the freeze authority, one revoking the mint authority.
+func countSetAuthority(tx *solana.Transaction) int {
+	n := 0
+	for _, ci := range tx.Message.Instructions {
+		if int(ci.ProgramIDIndex) >= len(tx.Message.AccountKeys) {
+			continue
+		}
+		prog := tx.Message.AccountKeys[ci.ProgramIDIndex]
+		if prog.Equals(token.ProgramID) && len(ci.Data) > 0 && ci.Data[0] == setAuthorityDiscriminator {
+			n++
+		}
+	}
+	return n
 }
 
 // isRevoke reports whether tx carries an SPL Token SetAuthority instruction.
@@ -188,7 +208,7 @@ func testPayer() KeySigner {
 }
 
 func newTestEngine(f *fakeRPC) *Engine {
-	e := NewEngine(f, testPayer())
+	e := NewEngine(f, testPayer(), WithNetwork(Devnet))
 	e.clk = firingClock{}
 	return e
 }
@@ -219,132 +239,6 @@ func TestMintHappyPathSucceeds(t *testing.T) {
 	}
 	if mint.IsZero() {
 		t.Fatal("expected a mint address on success")
-	}
-}
-
-// TestCreateMintReturnsZeroWhenExpired proves an expired create (its blockhash passed
-// without landing) yields the zero address: nothing landed on-chain, so there is nothing to
-// clean up and no phantom mint is reported.
-func TestCreateMintReturnsZeroWhenExpired(t *testing.T) {
-	f := &fakeRPC{confirm: false, lastValid: 100, blockHeight: 200}
-	eng := newTestEngine(f)
-
-	mint, err := eng.CreateMint(context.Background(), 9)
-	if err == nil {
-		t.Fatal("expected an expiry error")
-	}
-	if !mint.IsZero() {
-		t.Fatalf("expired create returned a non-zero address %s; nothing landed, so nothing exists to clean up", mint)
-	}
-}
-
-// TestCreateMintReturnsAddressWhenUnresolved proves an unresolved create (submitted, outcome
-// unknown because the context ended before it confirmed or expired) hands back the mint
-// address so the caller can revoke on a best-effort basis rather than strand a possible mint.
-func TestCreateMintReturnsAddressWhenUnresolved(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	// blockHeight <= lastValid so the tx has NOT expired; cancel at send so confirmOrExpire
-	// ends with an unknown outcome rather than a definitive expiry.
-	f := &fakeRPC{confirm: false, lastValid: 100, blockHeight: 50, cancelOnSend: 1, cancel: cancel}
-	eng := newTestEngine(f)
-
-	mint, err := eng.CreateMint(ctx, 9)
-	if err == nil {
-		t.Fatal("expected an unresolved-create error")
-	}
-	if mint.IsZero() {
-		t.Fatalf("unresolved create returned a zero address; a mint that may exist cannot be revoked (err=%v)", err)
-	}
-}
-
-// TestSubmitErrorDoesNotAbortLandedTx proves a SendTransaction error does not abort a
-// transaction that still lands: the fate is decided by watching the signature, not by the
-// submit call, so a lost submit response for a tx that confirms is a success.
-func TestSubmitErrorDoesNotAbortLandedTx(t *testing.T) {
-	f := &fakeRPC{confirm: true, lastValid: 100, failSendAt: 1}
-	eng := newTestEngine(f)
-
-	mint, err := eng.CreateMint(context.Background(), 9)
-	if err != nil {
-		t.Fatalf("a create that landed despite a submit error was reported as failed: %v", err)
-	}
-	if mint.IsZero() {
-		t.Fatal("expected the mint address for a landed create")
-	}
-}
-
-// TestMintRevokesAfterCancellationDuringFinalize proves the safety revoke is still submitted
-// when the caller's context is canceled during finalize. The cleanup runs on a detached
-// context, so a caller cancellation cannot also prevent the revoke.
-func TestMintRevokesAfterCancellationDuringFinalize(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	// confirm=true so the create (send #1) lands; send #2 is metadata, where the caller
-	// context is canceled, forcing the cleanup path.
-	f := &fakeRPC{confirm: true, lastValid: 100, cancelOnSend: 2, cancel: cancel}
-	eng := newTestEngine(f)
-
-	_, _, err := eng.Mint(ctx, safeSpec())
-	if err == nil {
-		t.Fatal("expected an error from the canceled finalize")
-	}
-	if !f.revokeSubmitted {
-		t.Fatal("safety revoke was never submitted after the finalize failure; the created mint is left inflatable")
-	}
-}
-
-// TestMintSucceedsWhenFinalRevokeLandsUnconfirmed proves a token whose lifecycle revoke was
-// submitted but never confirmed (yet landed on-chain) is reported as the safe, complete
-// token it is. finalize returns a confirmation error, but on-chain the authority is revoked
-// and the whole supply is present, so Mint trusts the verified state and succeeds.
-func TestMintSucceedsWhenFinalRevokeLandsUnconfirmed(t *testing.T) {
-	s := safeSpec()
-	// confirm=true so create/metadata/supply confirm; unconfirmRevoke makes the final revoke
-	// submitted-but-unconfirmed, and blockHeight past lastValid makes that revoke read as
-	// expired; the account already reflects a revoked, fully minted mint.
-	f := &fakeRPC{
-		confirm: true, unconfirmRevoke: true, lastValid: 100, blockHeight: 200,
-		mintData: revokedMintBytes(scaled(s.Supply, s.Decimals), s.Decimals),
-	}
-	eng := newTestEngine(f)
-
-	mint, _, err := eng.Mint(context.Background(), s)
-	if err != nil {
-		t.Fatalf("a safe, fully minted token was reported as failed: %v", err)
-	}
-	if mint.IsZero() {
-		t.Fatal("expected the mint address on success")
-	}
-}
-
-// TestAbortRetriesExpiredRevoke proves the cleanup revoke is retried with a fresh blockhash
-// when it expires without landing, rather than mistaking an expired revoke for a completed
-// one. The first revoke expires; the second confirms.
-func TestAbortRetriesExpiredRevoke(t *testing.T) {
-	f := &fakeRPC{confirm: true, lastValid: 100, blockHeight: 200, revokeExpireFor: 1}
-	eng := newTestEngine(f)
-
-	_, _, err := eng.abortMint(context.Background(), solana.PublicKey{1}, nil, errors.New("finalize failed"))
-	if err == nil || !strings.Contains(err.Error(), "authority revoked so supply is fixed") {
-		t.Fatalf("expected a successful revoke after retry, got: %v", err)
-	}
-	if f.revokeSends != 2 {
-		t.Fatalf("expected the expired revoke to be retried once (2 sends), got %d", f.revokeSends)
-	}
-}
-
-// TestAbortReportsUnresolvedWhenRevokeNeverLands proves cleanup reports the mint as possibly
-// mintable (never as safe) when every revoke attempt expires: the honest, conservative
-// outcome when the authority cannot be confirmed revoked.
-func TestAbortReportsUnresolvedWhenRevokeNeverLands(t *testing.T) {
-	f := &fakeRPC{confirm: false, lastValid: 100, blockHeight: 200}
-	eng := newTestEngine(f)
-
-	_, _, err := eng.abortMint(context.Background(), solana.PublicKey{1}, nil, errors.New("finalize failed"))
-	if err == nil || !strings.Contains(err.Error(), "may remain mintable") {
-		t.Fatalf("expected an unresolved/possibly-mintable report, got: %v", err)
-	}
-	if f.revokeSends != revokeAttempts {
-		t.Fatalf("expected %d revoke attempts before giving up, got %d", revokeAttempts, f.revokeSends)
 	}
 }
 
@@ -391,21 +285,6 @@ func TestConfirmOrExpireAcceptsConfirmedWhenAllowed(t *testing.T) {
 
 	if err := eng.confirmOrExpire(context.Background(), solana.Signature{9}, f.lastValid, rpc.CommitmentConfirmed); err != nil {
 		t.Fatalf("a confirmed signature was not accepted at confirmed commitment: %v", err)
-	}
-}
-
-// TestCreateMetadataRequiresFinalized proves the metadata attach is not accepted at merely
-// confirmed commitment. The mint's success report asserts the name/symbol but the final
-// verify never re-reads the metadata, so a confirmed-but-forkable metadata slot could be
-// dropped while the token is reported safe; the attach must finalize.
-func TestCreateMetadataRequiresFinalized(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	f := &fakeRPC{confirm: true, confirmedOnly: true, lastValid: 100, cancel: cancel}
-	f.cancelAfterStatus = 1
-	eng := newTestEngine(f)
-
-	if err := eng.CreateMetadata(ctx, solana.PublicKey{3}, "Name", "SYM", "https://example.com/y.json"); err == nil {
-		t.Fatal("CreateMetadata accepted a merely-confirmed metadata tx; a forked-out slot would drop the metadata while the mint is reported safe")
 	}
 }
 

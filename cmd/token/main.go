@@ -34,6 +34,8 @@ import (
 	"strconv"
 	"sync"
 
+	solana "github.com/gagliardetto/solana-go"
+
 	"github.com/ionalpha/flynn-extensions/mcpserver"
 	"github.com/ionalpha/flynn-extensions/token"
 )
@@ -48,6 +50,10 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The extension holds no endpoint: core sends every request, so this binary cannot know
+	// which cluster it is on by looking at a URL. It does not guess, either. The engine
+	// defaults to the strictest cluster, and only a cluster the chain itself identifies
+	// relaxes the custody bar, so an unidentified network demands a treasury.
 	s := mcpserver.New("token", version)
 	s.Register(newVerifyService().tool())
 	s.Register(newMintService().tool())
@@ -251,13 +257,17 @@ func (m *mintService) tool() mcpserver.Tool {
 	return mcpserver.Tool{
 		Name: "token_mint",
 		Description: "Mint a new fixed-supply SPL token safely on Solana: create the mint, attach metadata, " +
-			"mint the whole supply, then revoke the mint authority (freeze authority is never set). A scam-shaped " +
-			"request is refused. Call it with {name,symbol,metadataUri,decimals,supply}; the transactions are signed " +
-			"by the host with a key this tool never holds and submitted through the host's RPC endpoint, so the call " +
+			"mint the whole supply to the treasury, then revoke the mint authority (freeze authority is never set). A " +
+			"scam-shaped request is refused. Call it with {name,symbol,metadataUri,decimals,supply,treasury}; treasury " +
+			"is the address that receives the whole supply and should be a multisig vault (omit it on a test cluster " +
+			"and the payer keeps the supply; on mainnet omitting it is refused). The transactions are signed by the " +
+			"host with a key this tool never holds and submitted through the host's RPC endpoint, so the call " +
 			"completes through the host's call loop and returns {done,mint}.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
 			`"name":{"type":"string"},"symbol":{"type":"string"},"metadataUri":{"type":"string"},` +
-			`"decimals":{"type":"integer"},"supply":{"type":"integer"}}}`),
+			`"decimals":{"type":"integer"},"supply":{"type":"integer"},` +
+			`"treasury":{"type":"string","description":"base58 address receiving the whole supply (a multisig vault); required on mainnet"}},` +
+			`"required":["name","symbol","metadataUri","supply"]}`),
 		Handler: m.handle,
 	}
 }
@@ -271,6 +281,7 @@ func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (stri
 		MetadataURI string          `json:"metadataUri"`
 		Decimals    uint8           `json:"decimals"`
 		Supply      json.RawMessage `json:"supply"`
+		Treasury    string          `json:"treasury"` // base58 address that receives the whole supply
 	}
 	a.Decimals = 9
 	if err := json.Unmarshal(arguments, &a); err != nil {
@@ -289,8 +300,19 @@ func (m *mintService) handle(_ context.Context, arguments json.RawMessage) (stri
 		if err != nil {
 			return "", fmt.Errorf("token_mint: %w", err)
 		}
+		// An omitted treasury is the zero pubkey, which means "the payer keeps the supply".
+		// The safety policy refuses that on a live network; it is not rejected here, so the
+		// refusal comes from the one place that owns the rule.
+		var treasury solana.PublicKey
+		if a.Treasury != "" {
+			treasury, err = token.ParsePubkey(a.Treasury)
+			if err != nil {
+				return "", fmt.Errorf("token_mint: bad treasury address: %w", err)
+			}
+		}
 		s := token.StartMint(payer, token.MintSpec{
-			Name: a.Name, Symbol: a.Symbol, MetadataURI: a.MetadataURI, Decimals: a.Decimals, Supply: supply,
+			Name: a.Name, Symbol: a.Symbol, MetadataURI: a.MetadataURI,
+			Decimals: a.Decimals, Supply: supply, Treasury: treasury,
 		}, m.opts...)
 		return m.render(m.reg.store(s), s)
 	}

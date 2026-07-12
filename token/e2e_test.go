@@ -22,7 +22,7 @@ func TestE2EMintOnDevnet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load keypair: %v", err)
 	}
-	e := NewEngine(rpc.New(rpc.DevNet_RPC), KeySigner{Key: payerKey})
+	e := NewEngine(rpc.New(rpc.DevNet_RPC), KeySigner{Key: payerKey}, WithNetwork(Devnet))
 
 	spec := MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1_000_000_000}
 	mint, disclosures, err := e.Mint(context.Background(), spec)

@@ -13,7 +13,7 @@ import (
 // the engine parks on every payer signature and resumes when the driver supplies it.
 func driveMint(t *testing.T, f *fakeRPC, payer solana.PrivateKey, spec MintSpec) (Outcome, []SignRequest) {
 	t.Helper()
-	s := startMint(f, payer.PublicKey(), spec, firingClock{})
+	s := startMint(f, payer.PublicKey(), spec, firingClock{}, WithNetwork(Devnet))
 	var seen []SignRequest
 	for {
 		if out, done := s.Result(); done {
@@ -71,9 +71,12 @@ func TestSessionDrivesFullMint(t *testing.T) {
 	if out.Mint.IsZero() {
 		t.Fatal("clean mint returned a zero address")
 	}
-	// create, metadata, supply, revoke each require exactly one payer signature.
-	if len(seen) != 4 {
-		t.Fatalf("expected 4 payer-signature round-trips (create/metadata/supply/revoke), got %d", len(seen))
+	// The whole mint (create, metadata, supply, revoke) is ONE atomic transaction, so it
+	// costs exactly one payer signature. More than one would mean the lifecycle had been
+	// split back into separate transactions, reopening the window in which the payer holds
+	// a live mint authority.
+	if len(seen) != 1 {
+		t.Fatalf("expected 1 payer-signature round-trip for the atomic mint, got %d", len(seen))
 	}
 }
 
@@ -87,7 +90,7 @@ func TestSessionDeliversSignFailure(t *testing.T) {
 	spec := MintSpec{Name: "Example Token", Symbol: "EXMP", MetadataURI: "https://example.com/token.json", Decimals: 9, Supply: 1_000_000}
 	f := &fakeRPC{confirm: true, lastValid: 1000, mintData: revokedMintBytes(0, 9)}
 
-	s := startMint(f, payer.PublicKey(), spec, firingClock{})
+	s := startMint(f, payer.PublicKey(), spec, firingClock{}, WithNetwork(Devnet))
 	call, ok := s.Pending()
 	if !ok {
 		t.Fatal("expected the first payer-signature request")
@@ -131,7 +134,7 @@ func TestSessionAdvanceAfterDoneIsRejected(t *testing.T) {
 	f := &fakeRPC{confirm: true, lastValid: 1000}
 	// An up-front-invalid spec (empty name) is refused before any on-chain action, so the
 	// session completes immediately with no pending request.
-	s := startMint(f, payer.PublicKey(), MintSpec{Symbol: "X", MetadataURI: "u", Supply: 1}, firingClock{})
+	s := startMint(f, payer.PublicKey(), MintSpec{Symbol: "X", MetadataURI: "u", Supply: 1}, firingClock{}, WithNetwork(Devnet))
 	if _, done := s.Result(); !done {
 		t.Fatal("an up-front-invalid spec should complete the session immediately")
 	}

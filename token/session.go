@@ -161,7 +161,10 @@ func newSession[T any](cancel context.CancelFunc) *session[T] {
 // MintOption configures a mint session.
 type MintOption func(*mintConfig)
 
-type mintConfig struct{ clk clock.Timing }
+type mintConfig struct {
+	clk clock.Timing
+	eng []Option
+}
 
 // WithClock sets the timing source the mint's confirmation and cleanup loops poll on. Production
 // uses the system clock (the default); a caller that must not sleep in real time, a test above
@@ -176,6 +179,14 @@ func WithClock(clk clock.Timing) MintOption {
 	}
 }
 
+// OnNetwork tells the mint which cluster it is running against, which is what decides whether
+// the whole supply may be minted into the payer's own hot key. It is not a default: an engine
+// built without it runs as though it were on mainnet, so the custody bar is only ever relaxed
+// by a caller that has established the cluster, never by one that forgot to.
+func OnNetwork(n Network) MintOption {
+	return func(c *mintConfig) { c.eng = append(c.eng, WithNetwork(n)) }
+}
+
 // StartMint launches the guarded mint lifecycle for spec on a goroutine and returns the session
 // parked at its first action: a host call, or immediate completion (for a spec the engine
 // refuses up front, before any on-chain action). payer is the core-held key's PUBLIC half. The
@@ -186,20 +197,20 @@ func StartMint(payer solana.PublicKey, spec MintSpec, opts ...MintOption) *Sessi
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return startMint(nil, payer, spec, cfg.clk)
+	return startMint(nil, payer, spec, cfg.clk, cfg.eng...)
 }
 
 // startMint is StartMint with an injectable RPC client and clock, so a test drives the engine
 // against a fake ledger and through its confirm/wait loops deterministically instead of over a
 // real network and real sleeps. A nil client means production: the engine speaks through the
 // host transport, which has no network of its own.
-func startMint(client RPCClient, payer solana.PublicKey, spec MintSpec, clk clock.Timing) *Session {
+func startMint(client RPCClient, payer solana.PublicKey, spec MintSpec, clk clock.Timing, eng ...Option) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := newSession[Outcome](cancel)
 	if client == nil {
 		client = newHostClient(s.reqCh, s.repCh)
 	}
-	e := NewEngine(client, roundTripSigner{pub: payer, reqCh: s.reqCh, repCh: s.repCh})
+	e := NewEngine(client, roundTripSigner{pub: payer, reqCh: s.reqCh, repCh: s.repCh}, eng...)
 	e.clk = clk
 	go func() {
 		mint, disc, err := e.Mint(ctx, spec)

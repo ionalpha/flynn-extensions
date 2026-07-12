@@ -59,6 +59,21 @@ type TokenPlan struct {
 	// Distribution + identity.
 	CreatorSupplyPct uint8  // percent of supply the creator retains unvested
 	Impersonates     string // a project/brand this token's identity impersonates, if any
+
+	// Custody. LiveNetwork marks a network where the tokens carry real value (a mainnet),
+	// as opposed to a test cluster whose tokens are worthless. It raises the custody bar
+	// rather than changing what is safe: minting the entire supply into the same hot key
+	// that signs the transaction is tolerable when the tokens are play money, and is a
+	// single-key catastrophe when they are not.
+	LiveNetwork         bool // this action runs against a real-value network
+	TreasuryIsHotSigner bool // the whole supply lands in the key that signs the mint
+
+	// MutableMetadataURI marks metadata whose URI is not content-addressed. Freezing the
+	// on-chain metadata locks the URI STRING, not the document it points at: a name, symbol
+	// and logo served from an ordinary web host can still be swapped after launch by whoever
+	// controls that host. Content-addressed storage (IPFS, Arweave) closes that, because the
+	// address IS the hash of the content.
+	MutableMetadataURI bool
 }
 
 // Evaluate returns every policy violation in a plan, most severe first. An empty
@@ -106,6 +121,12 @@ func Evaluate(p TokenPlan) []Violation {
 	}
 	if strings.TrimSpace(p.Impersonates) != "" {
 		block("impersonation", "token identity impersonates "+p.Impersonates+": brand/impersonation scam")
+	}
+	if p.LiveNetwork && p.TreasuryIsHotSigner {
+		block("hot_key_treasury", "on a real-value network the whole supply would be minted to the same hot key that signs the mint: one key compromise takes the entire supply, and there is no threshold to stop it. Send the supply to a multisig treasury instead")
+	}
+	if p.LiveNetwork && p.MutableMetadataURI {
+		warn("mutable_metadata_uri", "metadata URI is not content-addressed: the on-chain metadata is frozen, but the name, symbol and logo served from that URL can still be swapped after launch by whoever controls the host. Use IPFS or Arweave to make the identity provably fixed")
 	}
 	if p.CreatorSupplyPct > 30 {
 		warn("creator_concentration", fmt.Sprintf("creator retains %d%% of supply unvested: dump risk, must be disclosed and vested", p.CreatorSupplyPct))

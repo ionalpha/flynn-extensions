@@ -215,7 +215,7 @@ func TestMintToolChoreography(t *testing.T) {
 	node := &fakeNode{mintData: revokedMint(scaled(supply, 9), 9)}
 	hostKey := base64.StdEncoding.EncodeToString(payer.PublicKey().Bytes())
 
-	m := newMintService(token.WithClock(firingClock{}))
+	m := newMintService(token.WithClock(firingClock{}), token.OnNetwork(token.Devnet))
 	start := `{"_hostKey":"` + hostKey + `","name":"Example Token","symbol":"EXMP",` +
 		`"metadataUri":"https://example.com/token.json","decimals":9,"supply":"1000000"}`
 	out := drive(t, m.handle, node, payer, start, "")
@@ -253,7 +253,7 @@ func TestMintToolDeliversSignFailure(t *testing.T) {
 	node := &fakeNode{mintData: revokedMint(0, 9)}
 	hostKey := base64.StdEncoding.EncodeToString(payer.PublicKey().Bytes())
 
-	m := newMintService(token.WithClock(firingClock{}))
+	m := newMintService(token.WithClock(firingClock{}), token.OnNetwork(token.Devnet))
 	start := `{"_hostKey":"` + hostKey + `","name":"Example Token","symbol":"EXMP",` +
 		`"metadataUri":"https://example.com/token.json","decimals":9,"supply":"1000000"}`
 	out := drive(t, m.handle, node, payer, start, "vault unavailable")
@@ -275,7 +275,7 @@ func TestMintToolDeliversSignFailure(t *testing.T) {
 
 // TestMintToolRejectsBadInput covers the parse/guard paths of the tool boundary.
 func TestMintToolRejectsBadInput(t *testing.T) {
-	m := newMintService()
+	m := newMintService(token.OnNetwork(token.Devnet))
 	if _, err := m.handle(context.Background(), []byte(`{"_hostKey":"not-base64!!","supply":"1"}`)); err == nil {
 		t.Fatal("expected an error for a bad host key")
 	}

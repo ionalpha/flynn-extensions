@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	solana "github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 
 	"github.com/ionalpha/flynn-extensions/token/safety"
 )
@@ -20,6 +21,57 @@ type MintSpec struct {
 	MetadataURI string
 	Decimals    uint8
 	Supply      uint64 // whole tokens; scaled by decimals when minted
+
+	// Treasury owns the account the whole supply is minted into, and holds the metadata
+	// update authority. It is the one address that still has anything after the mint: the
+	// mint authority is revoked and no freeze authority is ever set, so the payer ends the
+	// lifecycle with no power and no tokens.
+	//
+	// It is meant to be a multisig vault (a Squads vault is an ordinary pubkey, and an
+	// off-curve PDA, which the associated-token account handles). The zero value means the
+	// payer keeps the supply, which is fine on a test cluster and is refused on a live one
+	// by safety's hot_key_treasury rule.
+	Treasury solana.PublicKey
+}
+
+// treasury resolves the account that receives the supply: the declared Treasury, or the
+// payer when none was declared.
+func (e *Engine) treasury(s MintSpec) solana.PublicKey {
+	if s.Treasury.IsZero() {
+		return e.payer.PublicKey()
+	}
+	return s.Treasury
+}
+
+// checkTreasurySpendable refuses a treasury that could receive the supply but never spend it.
+//
+// The case that matters is a Squads multisig. It has two addresses: the config account (the
+// one the UI shows, owned by the Squads program) and the vault (a signer-only PDA, derived
+// from ["multisig", config, "vault", index]). Squads signs as the VAULT. It never signs as
+// the config account, so an associated token account owned by the config is a black hole:
+// the tokens arrive, and no instruction in any program can ever move them. There is no
+// recovery, no key, no threshold. Pasting the wrong one of two very similar addresses would
+// destroy the entire supply in a transaction that succeeds.
+//
+// So: if the treasury is a data account owned by the Squads program, it is the config, and
+// this refuses. A vault PDA holds no data and is not owned by Squads, so a correct treasury
+// passes. A plain wallet passes. An address that does not exist yet passes, because that is
+// what an unfunded vault (and any fresh wallet) looks like.
+func (e *Engine) checkTreasurySpendable(ctx context.Context, treasury solana.PublicKey) error {
+	info, err := e.rpc.GetAccountInfoWithOpts(ctx, treasury, &rpc.GetAccountInfoOpts{Commitment: rpc.CommitmentFinalized})
+	if err != nil {
+		// Solana reports a non-existent account as a null value, not an error, so a real
+		// error here means the check could not be performed. Do not mint on an unproven
+		// treasury: the failure this guards against is unrecoverable.
+		return fmt.Errorf("treasury %s could not be checked before minting to it: %w", treasury, err)
+	}
+	if info == nil || info.Value == nil {
+		return nil // does not exist yet: an ordinary fresh wallet or an unfunded vault
+	}
+	if info.Value.Owner.Equals(SquadsV4ProgramID) {
+		return fmt.Errorf("treasury %s is a Squads multisig CONFIG account, not its vault: tokens sent here can never be spent by anyone, because Squads only ever signs as the vault. Use the vault address (Squads shows it as the vault/treasury; it is derived from seeds [\"multisig\", %s, \"vault\", index])", treasury, treasury)
+	}
+	return nil
 }
 
 // Mint runs the full guarded lifecycle and returns the mint address plus any
@@ -41,142 +93,125 @@ func (e *Engine) Mint(ctx context.Context, s MintSpec) (solana.PublicKey, []safe
 	}
 
 	// The final shape this engine produces: fixed supply (mint authority revoked), no
-	// freeze/hook/delegate/fee, no yield or profit claim. The whole supply is minted to
-	// the payer (the treasury), so the plan records full creator retention; the plan
-	// also carries the requested identity so an impersonating name/symbol is refused.
+	// freeze/hook/delegate/fee, no yield or profit claim. The whole supply is minted to the
+	// treasury, so the plan records full creator retention; the plan also carries the
+	// requested identity so an impersonating name/symbol is refused, and the custody facts
+	// so that a live-network mint into the signing hot key is refused before anything is
+	// signed.
+	treasury := e.treasury(s)
 	plan := safety.TokenPlan{
-		Chain:            "solana",
-		Op:               "mint",
-		CreatorSupplyPct: 100,
-		Impersonates:     safety.ImpersonationTarget(s.Name, s.Symbol),
+		Chain:               "solana",
+		Op:                  "mint",
+		CreatorSupplyPct:    100,
+		Impersonates:        safety.ImpersonationTarget(s.Name, s.Symbol),
+		LiveNetwork:         e.net.Live(),
+		TreasuryIsHotSigner: treasury.Equals(e.payer.PublicKey()),
+		MutableMetadataURI:  !ContentAddressed(s.MetadataURI),
 	}
 	if err := safety.Guard(plan); err != nil {
 		return solana.PublicKey{}, nil, err
 	}
 	disclosures := safety.Evaluate(plan) // warn-level only; Guard already refused any blocking shape
 
-	// Bound the forward lifecycle so a caller that passes a deadline-less context cannot
-	// hang on the finalized-commitment waits if the cluster stalls finalization. Cleanup
-	// below detaches from this and gets its own budget, so a lifecycle timeout still cleans
-	// up rather than stranding a mint.
+	// The treasury has to be an address that can actually spend what it receives. This is
+	// checked on-chain, before anything is signed, because the one way to get it wrong is
+	// unrecoverable and silent.
+	if err := e.checkTreasurySpendable(ctx, treasury); err != nil {
+		return solana.PublicKey{}, disclosures, err
+	}
+
+	// Bound the whole operation so a caller that passes a deadline-less context cannot hang
+	// if the cluster stalls finalization.
 	opCtx, cancelOp := context.WithTimeout(ctx, lifecycleBudget)
 	defer cancelOp()
 
-	mint, err := e.CreateMint(opCtx, s.Decimals)
+	// The mint account is a fresh keypair. Its private key exists only for the length of this
+	// call, purely to sign its own creation; it is never persisted and holds no authority
+	// afterwards (the mint authority is the payer, and this transaction revokes it).
+	mintKey := solana.NewWallet()
+	ixs, err := e.buildMint(mintKey.PublicKey(), treasury, s)
 	if err != nil {
-		// CreateMint returns a non-zero address when it submitted the create
-		// transaction but could not confirm it, so the mint may already exist
-		// on-chain. abortMint revokes on a best-effort basis (and does nothing for a
-		// zero address, meaning nothing was ever submitted).
-		return e.abortMint(ctx, mint, disclosures, err)
+		return solana.PublicKey{}, disclosures, err
 	}
 
-	// The mint now exists with the payer as its mint authority. finalize runs metadata
-	// -> supply -> revoke; its final step (the revoke) can be submitted but not confirmed
-	// and still land, so a finalize error does NOT by itself mean the token is unsafe or
-	// incomplete. The authority and supply ON-CHAIN are the source of truth, so verify
-	// the real state and judge by that rather than by the last RPC result: otherwise a
-	// safe, fully minted token whose revoke merely lost its confirmation is reported as a
-	// failed, unsafe mint.
-	ferr := e.finalizeMint(opCtx, mint, s)
+	// ONE transaction: create + metadata + supply + revoke. Solana executes it atomically, so
+	// there is no reachable state in which this mint exists with a live mint authority. A
+	// failure here means nothing landed, so there is nothing to clean up and nothing unsafe
+	// left behind - which is why this path has no abort.
+	mint := mintKey.PublicKey()
+	if _, err := e.send(opCtx, ixs, rpc.CommitmentFinalized, KeySigner{Key: mintKey.PrivateKey}); err != nil {
+		if errors.Is(err, errTxExpired) {
+			// The blockhash expired, so the transaction can never be included: provably nothing
+			// happened on-chain.
+			return solana.PublicKey{}, disclosures, fmt.Errorf("mint did not land: %w", err)
+		}
+		// The outcome is unknown (a lost confirmation, a dead RPC, a cancelled context). Because
+		// the transaction is atomic, the only two possibilities are "nothing happened" and "the
+		// finished, safe token exists". Read the chain to find out which, rather than guessing.
+		return e.resolveUnconfirmed(ctx, mint, s, disclosures, err)
+	}
 
-	// Detach from the caller's context so a cancellation that caused the finalize failure
-	// does not also skip the verify, but bound it with cleanupBudget so a hung RPC cannot
-	// block the mint forever before cleanup runs.
-	verifyCtx, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
-	st, verr := e.Verify(verifyCtx, mint)
-	cancelVerify()
-	if verr != nil {
-		// The state cannot be read, so safety cannot be proven: revoke the authority
-		// best-effort and surface both causes.
-		return e.abortMint(ctx, mint, disclosures, errors.Join(ferr, verr))
-	}
-	if st.Freezable() {
-		return mint, disclosures, fmt.Errorf("post-mint verify failed: a freeze authority is present on %s", mint)
-	}
-	if !st.SupplyFixed() {
-		// The authority is still live, so the mint could be inflated: revoke it. On the
-		// happy path (ferr == nil) this means a revoke that reported success did not take,
-		// so re-revoke rather than trust the earlier result.
-		cause := ferr
-		if cause == nil {
-			cause = fmt.Errorf("post-mint verify: mint authority is NOT revoked on %s", mint)
-		}
-		return e.abortMint(ctx, mint, disclosures, cause)
-	}
-	// Authority revoked and no freeze authority: the mint is safe. If it also holds the
-	// whole requested supply the token is complete, even when finalize reported a late
-	// error on its already-landed revoke.
-	if expected, aerr := scaledAmount(s.Supply, s.Decimals); aerr == nil && st.Supply != expected {
-		incomplete := fmt.Sprintf("mint %s is safe (authority revoked, no freeze) but holds supply %d, not the requested %d", mint, st.Supply, expected)
-		if ferr != nil {
-			return mint, disclosures, fmt.Errorf("%s: %w", incomplete, ferr)
-		}
-		return mint, disclosures, errors.New(incomplete)
+	// The transaction landed. Verify the finished mint against the chain rather than trusting
+	// our own transaction to have done what it said: the on-chain state is the only thing a
+	// holder can check, so it is the only thing worth reporting.
+	if err := e.verifySafe(opCtx, mint, s); err != nil {
+		return mint, disclosures, err
 	}
 	return mint, disclosures, nil
 }
 
-// abortMint drives the mint into a supply-fixed state after a mid-lifecycle failure so a
-// created but unfinished mint can never be inflated, then returns the wrapped cause. A zero
-// mint address means creation is proven never to have landed, so there is nothing to
-// revoke. The revoke runs on a context detached from the caller's cancellation (via
-// context.WithoutCancel) so a timeout that caused the original failure cannot also prevent
-// cleanup, bounded by cleanupBudget so a dead network cannot hang forever; reaching that
-// bound reports the mint as unresolved (possibly mintable), never as safe.
-func (e *Engine) abortMint(ctx context.Context, mint solana.PublicKey, disclosures []safety.Violation, cause error) (solana.PublicKey, []safety.Violation, error) {
-	if mint.IsZero() {
-		return solana.PublicKey{}, disclosures, cause
-	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+// resolveUnconfirmed decides the outcome of an atomic mint whose confirmation was lost. The
+// transaction either landed whole or not at all, so this reads the mint account: if it is
+// absent, nothing happened; if it is present, it is the finished token and must still pass
+// the same verification as the happy path. Neither branch can leave an inflatable mint,
+// which is the whole reason for making the transaction atomic.
+func (e *Engine) resolveUnconfirmed(ctx context.Context, mint solana.PublicKey, s MintSpec, disclosures []safety.Violation, cause error) (solana.PublicKey, []safety.Violation, error) {
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
 	defer cancel()
-	if err := e.ensureRevoked(cleanupCtx, mint); err != nil {
-		return mint, disclosures, fmt.Errorf("mint %s aborted after creation and the safety revoke could not be confirmed (it may remain mintable): %w", mint, errors.Join(cause, err))
+
+	st, err := e.Verify(checkCtx, mint)
+	if err != nil {
+		// Cannot tell whether it landed. Say so: an unresolved mint is not a failure and not a
+		// success, and reporting it as either would be a lie. It is still not unsafe, because
+		// an atomic transaction cannot have landed halfway.
+		return mint, disclosures, fmt.Errorf("mint %s is unresolved: the transaction was submitted but its outcome could not be read, so it either landed complete or not at all: %w", mint, errors.Join(cause, err))
 	}
-	return mint, disclosures, fmt.Errorf("mint %s aborted after creation; mint authority revoked so supply is fixed: %w", mint, cause)
+	if !st.SupplyFixed() || st.Freezable() {
+		// Unreachable if the chain is behaving: the same transaction that created this mint
+		// revoked its authority. Refuse to call it safe.
+		return mint, disclosures, fmt.Errorf("mint %s landed in an unsafe state (supplyFixed=%t freezable=%t), which an atomic mint cannot produce: %w", mint, st.SupplyFixed(), st.Freezable(), cause)
+	}
+	if err := e.checkSupply(st, mint, s); err != nil {
+		return mint, disclosures, err
+	}
+	return mint, disclosures, nil // it landed after all, and it is safe
 }
 
-// ensureRevoked revokes the mint authority and confirms it on-chain, deciding by the
-// mint's verified state rather than any single RPC result. It returns nil once the
-// authority is revoked. Each RevokeMintAuthority uses a fresh blockhash and waits for that
-// revoke to land or expire, so a revoke that expires without landing is retried rather than
-// mistaken for done, and a revoke that already landed (an earlier unconfirmed one) is
-// detected by verifying before each attempt. It gives up only when the context ends or the
-// attempt budget is exhausted, returning the last error so the caller reports the mint as
-// possibly still mintable rather than falsely safe.
-func (e *Engine) ensureRevoked(ctx context.Context, mint solana.PublicKey) error {
-	var last error
-	for range revokeAttempts {
-		if st, err := e.Verify(ctx, mint); err == nil && st.SupplyFixed() {
-			return nil // already revoked (possibly by an earlier revoke that has since landed)
-		}
-		err := e.RevokeMintAuthority(ctx, mint)
-		if err == nil {
-			return nil // this revoke landed and confirmed
-		}
-		last = err
-		if ctx.Err() != nil {
-			break // the context ended: stop rather than spin
-		}
+// verifySafe re-reads a finished mint and proves the safe shape from on-chain state.
+func (e *Engine) verifySafe(ctx context.Context, mint solana.PublicKey, s MintSpec) error {
+	st, err := e.Verify(ctx, mint)
+	if err != nil {
+		return fmt.Errorf("post-mint verify of %s failed, so its safety is unproven: %w", mint, err)
 	}
-	if last == nil {
-		last = fmt.Errorf("mint %s authority could not be confirmed revoked", mint)
+	if st.Freezable() {
+		return fmt.Errorf("post-mint verify failed: a freeze authority is present on %s", mint)
 	}
-	return last
+	if !st.SupplyFixed() {
+		return fmt.Errorf("post-mint verify failed: the mint authority is NOT revoked on %s, so the supply could be inflated", mint)
+	}
+	return e.checkSupply(st, mint, s)
 }
 
-// finalizeMint attaches metadata, mints the whole supply, and revokes the mint
-// authority. It is the part of the lifecycle that runs after the mint exists; the
-// caller reacts to any error by revoking the mint authority so the mint is never left
-// mintable.
-func (e *Engine) finalizeMint(ctx context.Context, mint solana.PublicKey, s MintSpec) error {
-	if err := e.CreateMetadata(ctx, mint, s.Name, s.Symbol, s.MetadataURI); err != nil {
+// checkSupply proves the mint holds exactly the requested supply.
+func (e *Engine) checkSupply(st MintState, mint solana.PublicKey, s MintSpec) error {
+	expected, err := scaledAmount(s.Supply, s.Decimals)
+	if err != nil {
 		return err
 	}
-	if err := e.MintSupply(ctx, mint, s.Supply, s.Decimals); err != nil {
-		return err
+	if st.Supply != expected {
+		return fmt.Errorf("mint %s is safe (authority revoked, no freeze) but holds supply %d, not the requested %d", mint, st.Supply, expected)
 	}
-	return e.RevokeMintAuthority(ctx, mint)
+	return nil
 }
 
 // Metaplex Token Metadata field byte limits.

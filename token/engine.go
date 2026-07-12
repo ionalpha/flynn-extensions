@@ -1,12 +1,21 @@
 // Package token is an optional, capability-gated Solana token engine: it creates a
-// fixed-supply SPL token, attaches and edits Metaplex metadata, revokes the mint
-// authority, and verifies the result, entirely in-process. It is not part of the
+// fixed-supply SPL token, attaches immutable Metaplex metadata, mints the supply to a
+// treasury, revokes the mint authority, and verifies the result. It is not part of the
 // default build; a host mounts it behind the token capability.
 //
-// Every mutating step is a method that returns an error, never a process exit, so
-// the engine composes under the governed dispatch waist. The engine performs the
-// mechanics only; the safety policy that forbids scam-shaped tokens wraps it
-// separately and is what a host actually grants.
+// There is exactly ONE way to mint with this package: Engine.Mint. The individual steps
+// (create, metadata, supply, revoke) are unexported ON PURPOSE. Every one of them is a
+// step that, run on its own, can leave an unsafe token behind - a mint whose authority
+// was never revoked can be inflated forever - and the safety policy that forbids
+// scam-shaped tokens is enforced inside Mint, before anything is signed. Exporting the
+// steps would make that policy a convention a caller could skip; keeping them unexported
+// makes it a property of the package. If you find yourself needing to export one, you are
+// about to create a path to an unsafe token.
+//
+// The safe shape is not merely checked, it is unbuildable: there is no option anywhere in
+// this package to set a freeze authority, a transfer hook, a transfer fee, or a permanent
+// delegate. The engine cannot express a scam token, and Mint re-verifies the finished mint
+// on-chain rather than trusting its own transactions to have landed.
 package token
 
 import (
@@ -18,8 +27,6 @@ import (
 
 	bin "github.com/gagliardetto/binary"
 	solana "github.com/gagliardetto/solana-go"
-	ata "github.com/gagliardetto/solana-go/programs/associated-token-account"
-	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 
@@ -63,8 +70,6 @@ var token2022ProgramID = solana.MustPublicKeyFromBase58("TokenzQdBNbLqP5VEhdkAS6
 // metadataProgram is the Metaplex Token Metadata program.
 var metadataProgram = solana.MustPublicKeyFromBase58("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
 
-var sysvarInstructions = solana.MustPublicKeyFromBase58("Sysvar1nstructions1111111111111111111111111")
-
 // RPCClient is the subset of the Solana RPC the engine uses, named as an interface
 // so a test can drive the engine against a fake ledger.
 type RPCClient interface {
@@ -99,12 +104,28 @@ type Engine struct {
 	rpc   RPCClient
 	payer Signer
 	clk   clock.Timing
+	net   Network
 }
 
 // NewEngine builds an engine over an RPC client and a payer/authority signer.
-func NewEngine(client RPCClient, payer Signer) *Engine {
-	return &Engine{rpc: client, payer: payer, clk: clock.System{}}
+//
+// The network defaults to Mainnet, the strictest setting, so an engine built without a
+// deliberate WithNetwork is held to real-money custody rules. A caller that forgets to
+// say which cluster it is on gets refused, not quietly trusted.
+func NewEngine(client RPCClient, payer Signer, opts ...Option) *Engine {
+	e := &Engine{rpc: client, payer: payer, clk: clock.System{}, net: Mainnet}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
+
+// Option configures an Engine at construction.
+type Option func(*Engine)
+
+// WithNetwork declares which cluster the engine runs against. It does not change what is
+// safe; it changes how much custody rigour is demanded (see safety.TokenPlan.LiveNetwork).
+func WithNetwork(n Network) Option { return func(e *Engine) { e.net = n } }
 
 // MintState is the observable, verifiable state of a mint.
 type MintState struct {
@@ -121,69 +142,6 @@ func (m MintState) SupplyFixed() bool { return m.MintAuthority == nil }
 // Freezable reports whether any account can be frozen.
 func (m MintState) Freezable() bool { return m.FreezeAuthority != nil }
 
-// CreateMint creates a fresh mint with the payer as mint authority and NO freeze
-// authority, returning its address. Metadata must be attached before the mint
-// authority is revoked, so this does not revoke anything.
-func (e *Engine) CreateMint(ctx context.Context, decimals uint8) (solana.PublicKey, error) {
-	mint := solana.NewWallet()
-	rent, err := e.rpc.GetMinimumBalanceForRentExemption(ctx, mintAccountSize, rpc.CommitmentFinalized)
-	if err != nil {
-		return solana.PublicKey{}, fmt.Errorf("rent exemption: %w", err)
-	}
-	create := system.NewCreateAccountInstruction(rent, mintAccountSize, token.ProgramID, e.payer.PublicKey(), mint.PublicKey()).Build()
-	initMint, err := token.NewInitializeMint2InstructionBuilder().
-		SetDecimals(decimals).
-		SetMintAuthority(e.payer.PublicKey()).
-		SetMintAccount(mint.PublicKey()).
-		ValidateAndBuild()
-	if err != nil {
-		return solana.PublicKey{}, fmt.Errorf("build initialize mint: %w", err)
-	}
-	_, err = e.send(ctx, []solana.Instruction{create, initMint}, rpc.CommitmentConfirmed, KeySigner{Key: mint.PrivateKey})
-	if err != nil {
-		if errors.Is(err, errTxExpired) {
-			// The create can never land (its blockhash expired), so no account exists and
-			// there is nothing to clean up.
-			return solana.PublicKey{}, fmt.Errorf("create mint: %w", err)
-		}
-		// The outcome is unknown (the submit response or confirmation was lost, or the
-		// context ended): the mint may exist on-chain, so return its address for the
-		// caller to reconcile and revoke on a best-effort basis rather than strand it.
-		return mint.PublicKey(), fmt.Errorf("create mint unresolved: %w", err)
-	}
-	// The create landed, so the account exists. Best-effort wait for finalized visibility
-	// so the next instruction on a load-balanced RPC is less likely to race propagation;
-	// proceed even if it lags, since confirmation already proved the account exists.
-	_ = e.waitForAccount(ctx, mint.PublicKey())
-	return mint.PublicKey(), nil
-}
-
-// MintSupply creates the payer's associated token account and mints the whole
-// supply (scaled by decimals) into it.
-func (e *Engine) MintSupply(ctx context.Context, mint solana.PublicKey, whole uint64, decimals uint8) error {
-	owner := e.payer.PublicKey()
-	dest, _, err := solana.FindAssociatedTokenAddress(owner, mint)
-	if err != nil {
-		return fmt.Errorf("derive ATA: %w", err)
-	}
-	createATA, err := ata.NewCreateInstructionBuilder().SetPayer(owner).SetWallet(owner).SetMint(mint).ValidateAndBuild()
-	if err != nil {
-		return fmt.Errorf("build create ATA: %w", err)
-	}
-	amount, err := scaledAmount(whole, decimals)
-	if err != nil {
-		return err
-	}
-	mintTo, err := token.NewMintToInstructionBuilder().
-		SetAmount(amount).SetMintAccount(mint).SetDestinationAccount(dest).SetAuthorityAccount(owner).
-		ValidateAndBuild()
-	if err != nil {
-		return fmt.Errorf("build mint-to: %w", err)
-	}
-	_, err = e.send(ctx, []solana.Instruction{createATA, mintTo}, rpc.CommitmentConfirmed)
-	return err
-}
-
 // scaledAmount returns whole scaled by 10^decimals, or an error if the result
 // overflows uint64. Callers validate this before any on-chain action so an invalid
 // supply never leaves a partially-created mint behind.
@@ -196,23 +154,6 @@ func scaledAmount(whole uint64, decimals uint8) (uint64, error) {
 		amount *= 10
 	}
 	return amount, nil
-}
-
-// RevokeMintAuthority sets the mint authority to None: supply is permanently fixed. This
-// is the irreversible safety action, so it waits for FINALIZED commitment: a merely
-// confirmed revoke could be forked out, which would leave the payer as mint authority after
-// the caller was told the supply is fixed.
-func (e *Engine) RevokeMintAuthority(ctx context.Context, mint solana.PublicKey) error {
-	ix, err := token.NewSetAuthorityInstructionBuilder().
-		SetAuthorityType(token.AuthorityMintTokens).
-		SetSubjectAccount(mint).
-		SetAuthorityAccount(e.payer.PublicKey()).
-		ValidateAndBuild()
-	if err != nil {
-		return fmt.Errorf("build set-authority: %w", err)
-	}
-	_, err = e.send(ctx, []solana.Instruction{ix}, rpc.CommitmentFinalized)
-	return err
 }
 
 // Verify fetches and decodes the mint, returning its observable state. It reads at finalized
@@ -382,30 +323,6 @@ func (e *Engine) confirmOrExpire(ctx context.Context, sig solana.Signature, last
 		st2, err2 := e.rpc.GetSignatureStatuses(ctx, true, sig)
 		if err2 == nil && st2 != nil && (len(st2.Value) == 0 || st2.Value[0] == nil) {
 			return errTxExpired
-		}
-	}
-}
-
-// waitForAccount blocks until an account exists with non-empty data at confirmed
-// commitment, so a freshly created account is visible before the next instruction reads it
-// (reduces a propagation race on public RPC). Confirmed (not finalized) is enough here: the
-// create is already confirmed, and confirmed visibility is what the next instruction's
-// preflight needs, without adding finalization latency to every mint. It is a best-effort
-// barrier on the happy path, not a safety decision: callers proceed even if it returns an
-// error, because confirmation has already proven the account exists.
-func (e *Engine) waitForAccount(ctx context.Context, pubkey solana.PublicKey) error {
-	deadline := e.clk.After(cleanupBudget)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("account %s not visible before the wait budget elapsed", pubkey)
-		case <-e.clk.After(pollInterval):
-		}
-		info, err := e.rpc.GetAccountInfoWithOpts(ctx, pubkey, &rpc.GetAccountInfoOpts{Commitment: rpc.CommitmentConfirmed})
-		if err == nil && info != nil && info.Value != nil && len(info.Value.Data.GetBinary()) > 0 {
-			return nil
 		}
 	}
 }
