@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# Everything CI will run, run here first.
+#
+# The point is that a green run here means a green run there. Without it, the only
+# way to learn that a change fails the shared lint config, or that a new cmd/ has
+# no entry in the release manifest, is to push and wait: the answer arrives after a
+# full CI cycle, on a branch that is already public, and the fix is another commit
+# on top.
+#
+#   ./dev/check
+#
+set -eu
+here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$here/.."
+
+git config core.hooksPath .githooks
+
+"$here/test"
+"$here/lint"
+
+# The release manifest is what a tag will trust. A cmd/<name> with no entry ships
+# nothing, and finds out at release time, when the mistake is a broken release
+# rather than a failing check.
+echo "==> release manifest"
+for cmd in cmd/*/; do
+  name="$(basename "$cmd")"
+  if ! grep -q "name: $name\$" .release.yaml; then
+    echo "==> cmd/$name has no entry in .release.yaml: it would ship nothing" >&2
+    exit 1
+  fi
+done
+echo "    every cmd/ is in .release.yaml"
+
+echo
+echo "OK: all checks passed."

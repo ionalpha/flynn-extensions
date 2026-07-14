@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+# Run the test suite the way CI runs it: with the race detector.
+#
+# With no args, tests everything; pass args to scope, e.g. `dev/test ./signer/...`.
+# The race detector always runs. This repository signs transactions and holds keys;
+# a data race in that code is not a flake to be retried, it is a bug that will pick
+# its moment.
+set -eu
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+echo "==> go build ./..."
+go build ./...
+
+echo "==> go vet ./..."
+go vet ./...
+
+if [ "$#" -gt 0 ]; then
+  exec go test -race "$@"
+fi
+
+echo "==> go test -race ./..."
+exec go test -race ./...

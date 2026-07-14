@@ -1,0 +1,62 @@
+#!/usr/bin/env sh
+# Lint against the SHARED config, which is the only one that counts.
+#
+# This repository is a thin caller of ionalpha/go-ci: the reusable workflow checks
+# go-ci out and points golangci-lint at ITS .golangci.yml. That file is not in this
+# repository, so a bare `golangci-lint run` here does not use it. It picks up the
+# tool's defaults, reports no issues, and CI then fails on rules the defaults never
+# applied. A gate that reports success where CI reports failure is worse than no
+# gate: it is a gate that lies.
+#
+# The rule that catches people is goimports' local-prefixes: an ionalpha import
+# belongs in its own group AFTER third-party, and gofmt does not know that.
+#
+#   stdlib
+#
+#   golang.org/x/term
+#
+#   github.com/ionalpha/flynn-extensions/signer
+#
+# The config is fetched once and cached. GOCI_REF pins which revision to lint
+# against (default main, matching the ci-ref the workflows pass).
+set -eu
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+ref="${GOCI_REF:-main}"
+cache=".gotmp/golangci-${ref}.yml"
+url="https://raw.githubusercontent.com/ionalpha/go-ci/${ref}/.golangci.yml"
+
+mkdir -p .gotmp
+if [ ! -f "$cache" ] || [ -n "${GOCI_REFRESH:-}" ]; then
+  echo "==> fetching the shared lint config ($ref)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$cache"
+  elif command -v gh >/dev/null 2>&1; then
+    gh api "repos/ionalpha/go-ci/contents/.golangci.yml?ref=${ref}" \
+      -H "Accept: application/vnd.github.raw" >"$cache"
+  else
+    echo "==> need curl or gh to fetch $url" >&2
+    exit 1
+  fi
+fi
+
+# A truncated or error-page download would lint against nothing and pass.
+if ! grep -q '^linters:' "$cache" 2>/dev/null; then
+  rm -f "$cache"
+  echo "==> the shared lint config did not download cleanly: refusing to lint against it" >&2
+  exit 1
+fi
+
+echo "==> go mod tidy (must leave go.mod/go.sum unchanged)"
+cp go.mod .gotmp/go.mod.bak
+cp go.sum .gotmp/go.sum.bak
+go mod tidy
+if ! cmp -s go.mod .gotmp/go.mod.bak || ! cmp -s go.sum .gotmp/go.sum.bak; then
+  cp .gotmp/go.mod.bak go.mod
+  cp .gotmp/go.sum.bak go.sum
+  echo "==> go mod tidy changed go.mod/go.sum: commit the tidied files" >&2
+  exit 1
+fi
+
+echo "==> golangci-lint run (shared config)"
+exec golangci-lint run -c "$cache" ./...
