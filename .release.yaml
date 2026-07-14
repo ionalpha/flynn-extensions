@@ -30,3 +30,10 @@ components:
   # Mints and manages SPL tokens on Solana, holding neither a signing key nor network
   # egress of its own.
   - name: token
+
+  # Holds the Solana signing key and the Solana transaction parser, and nothing else. It is
+  # released separately from the token extension ON PURPOSE: the extension that BUILDS a
+  # transaction must not be the one that decides whether to sign it, or it is vouching for
+  # its own payload. Two artifacts, pinned separately, means a compromised token extension
+  # still obtains no signature.
+  - name: solana-signer
