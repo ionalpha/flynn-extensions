@@ -17,9 +17,10 @@ import (
 	"os"
 	"os/signal"
 
+	"golang.org/x/term"
+
 	"github.com/ionalpha/flynn-extensions/signer"
 	"github.com/ionalpha/flynn-extensions/solana"
-	"golang.org/x/term"
 )
 
 // version is stamped by the release build (-X main.version). It must be a var: the linker
