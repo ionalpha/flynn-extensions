@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -31,6 +32,27 @@ func testKey(t *testing.T) *Ed25519Key {
 	return k
 }
 
+// unlocked builds a vault already holding the key, which is the state every signing test cares
+// about. The locked state has its own test.
+func unlocked(t *testing.T) (*vault, *Ed25519Key) {
+	t.Helper()
+	key := testKey(t)
+	v := &vault{}
+	v.set(key)
+	return v, key
+}
+
+// opener returns an Opener that hands back key for the right passphrase and fails otherwise,
+// standing in for a sealed file without touching the disk.
+func opener(key Key, want string) Opener {
+	return func(passphrase []byte) (Key, error) {
+		if string(passphrase) != want {
+			return nil, errors.New("wrong passphrase")
+		}
+		return key, nil
+	}
+}
+
 func signRequest(t *testing.T, payload []byte) json.RawMessage {
 	t.Helper()
 	in, err := json.Marshal(map[string]string{"payload": base64.StdEncoding.EncodeToString(payload)})
@@ -43,8 +65,8 @@ func signRequest(t *testing.T, payload []byte) json.RawMessage {
 // TestSignToolSignsWhatThePolicyApproves: the happy path produces a signature that actually
 // verifies against the advertised public key.
 func TestSignToolSignsWhatThePolicyApproves(t *testing.T) {
-	key := testKey(t)
-	tool := signTool(key, approving{})
+	v, key := unlocked(t)
+	tool := signTool(v, approving{})
 	payload := []byte("a transaction the policy is happy with")
 
 	out, err := tool.Handler(context.Background(), signRequest(t, payload))
@@ -70,7 +92,8 @@ func TestSignToolSignsWhatThePolicyApproves(t *testing.T) {
 // come back as a reply with no signature in it, because a caller could read that as a
 // successful signature over nothing. "I refused" must never be readable as "here you go".
 func TestRefusalIsAnErrorNotAnEmptySignature(t *testing.T) {
-	tool := signTool(testKey(t), refusing{rule: "mint authority is not revoked in this transaction"})
+	v, _ := unlocked(t)
+	tool := signTool(v, refusing{rule: "mint authority is not revoked in this transaction"})
 
 	out, err := tool.Handler(context.Background(), signRequest(t, []byte("a draining transaction")))
 	if err == nil {
@@ -88,7 +111,8 @@ func TestRefusalIsAnErrorNotAnEmptySignature(t *testing.T) {
 // policy or the key. The parser is not handed unbounded input from a process that is assumed
 // to be compromisable.
 func TestSignerRefusesNonsense(t *testing.T) {
-	tool := signTool(testKey(t), approving{})
+	v, _ := unlocked(t)
+	tool := signTool(v, approving{})
 	ctx := context.Background()
 
 	cases := map[string]json.RawMessage{
@@ -112,9 +136,10 @@ func TestSignerRefusesNonsense(t *testing.T) {
 // defeat every other control in the system.
 func TestPublicToolNeverLeaksThePrivateHalf(t *testing.T) {
 	key := testKey(t)
-	out, err := publicTool(key).Handler(context.Background(), json.RawMessage(`{}`))
+	tool := unlockTool(&vault{}, opener(key, "pass"), approving{})
+	out, err := tool.Handler(context.Background(), json.RawMessage(`{"passphrase":"pass"}`))
 	if err != nil {
-		t.Fatalf("public: %v", err)
+		t.Fatalf("unlock: %v", err)
 	}
 
 	var reply map[string]string
@@ -139,10 +164,61 @@ func TestPublicToolNeverLeaksThePrivateHalf(t *testing.T) {
 // must not start at all. This is the one configuration that would quietly undo the design.
 func TestServeNeedsBothAKeyAndAPolicy(t *testing.T) {
 	ctx := context.Background()
-	if err := Serve(ctx, "x", "1", testKey(t), nil, strings.NewReader(""), &strings.Builder{}); err == nil {
+	if err := Serve(ctx, "x", "1", opener(testKey(t), "p"), nil, strings.NewReader(""), &strings.Builder{}); err == nil {
 		t.Fatal("a signer with no policy started: it would sign whatever it was handed")
 	}
 	if err := Serve(ctx, "x", "1", nil, approving{}, strings.NewReader(""), &strings.Builder{}); err == nil {
 		t.Fatal("a signer with no key started")
 	}
 }
+
+// TestALockedSignerSignsNothing: the process starts locked, and stays that way until the host
+// unlocks it. A signer that could sign before anyone proved they held the passphrase would make
+// the passphrase decorative.
+func TestALockedSignerSignsNothing(t *testing.T) {
+	tool := signTool(&vault{}, approving{}) // never unlocked
+	out, err := tool.Handler(context.Background(), signRequest(t, []byte("anything")))
+	if err == nil {
+		t.Fatal("a locked signer signed something")
+	}
+	if out != "" {
+		t.Fatalf("a locked signer returned a result: %q", out)
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Fatalf("the refusal did not say the key was locked: %v", err)
+	}
+}
+
+// TestUnlockRefusesTheWrongPassphrase: a failed unlock leaves the signer locked, so a wrong
+// guess does not half-open it.
+func TestUnlockRefusesTheWrongPassphrase(t *testing.T) {
+	v := &vault{}
+	tool := unlockTool(v, opener(testKey(t), "right"), approving{})
+	if _, err := tool.Handler(context.Background(), json.RawMessage(`{"passphrase":"wrong"}`)); err == nil {
+		t.Fatal("the signer unlocked under the wrong passphrase")
+	}
+	if v.get() != nil {
+		t.Fatal("a FAILED unlock left a key in the vault")
+	}
+}
+
+// TestUnlockBindsThePolicyToTheKey: a policy whose rules depend on the key (the Solana fee-payer
+// rule) is told which key it guards at unlock. Without this the policy would be judging
+// transactions against a zero key, and the fee-payer rule would be checking nothing.
+func TestUnlockBindsThePolicyToTheKey(t *testing.T) {
+	key := testKey(t)
+	policy := &bindable{}
+	tool := unlockTool(&vault{}, opener(key, "p"), policy)
+	if _, err := tool.Handler(context.Background(), json.RawMessage(`{"passphrase":"p"}`)); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	if !bytes.Equal(policy.bound, key.Public()) {
+		t.Fatal("the policy was not bound to the key it is guarding")
+	}
+}
+
+// bindable records the key it was bound to.
+type bindable struct{ bound []byte }
+
+func (b *bindable) Approve([]byte) error { return nil }
+func (b *bindable) BindKey(pub []byte)   { b.bound = pub }

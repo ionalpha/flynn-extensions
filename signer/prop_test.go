@@ -54,7 +54,9 @@ func TestARefusedPayloadIsNeverSigned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool := signTool(key, refusing{rule: "refused"})
+	v := &vault{}
+	v.set(key)
+	tool := signTool(v, refusing{rule: "refused"})
 	ctx := context.Background()
 
 	rapid.Check(t, func(rt *rapid.T) {

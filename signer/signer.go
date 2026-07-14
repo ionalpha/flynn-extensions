@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/ionalpha/flynn-extensions/mcpserver"
 )
@@ -68,45 +69,115 @@ type Policy interface {
 // Tool names. Flynn calls exactly these two and nothing else. A signer advertising more than
 // this is a signer doing more than signing.
 const (
-	PublicTool = "signer_public"
-	SignTool   = "signer_sign"
+	// UnlockTool opens the sealed key and answers with its public half. It is the mount
+	// handshake, and it is the only way the key becomes usable.
+	UnlockTool = "signer_unlock"
+	// SignTool signs a payload, or refuses it. It refuses outright until the key is unlocked.
+	SignTool = "signer_sign"
 )
+
+// Opener turns a passphrase into a usable Key. It is how custody is chosen: a sealed file
+// unseals under the passphrase, and a hardware device ignores it and answers from the device.
+//
+// The passphrase arrives over the MCP channel rather than the environment, because the host
+// launches this process with its environment scrubbed: no secret reaches an extension by
+// ambient means, and a secret it is meant to have is one the operator handed it deliberately.
+// The host holds the passphrase; this process holds the key. The host never sees the key.
+//
+// That is the right split for the threat this design defends against, which is a compromised
+// WORKER extension, not a compromised host. A host that has been compromised launches whatever
+// binary it likes and is past arguing with; keeping the key out of it buys nothing there. What
+// it buys is that the extension which BUILDS a transaction can never sign one.
+type Opener func(passphrase []byte) (Key, error)
 
 // maxPayloadBytes bounds a signing request. A transaction is small; anything on this scale is
 // not a transaction, and the parser should not be handed unbounded input from a process that
 // is assumed to be compromisable.
 const maxPayloadBytes = 64 << 10
 
-// Serve runs a signer extension over stdio: it registers the two tools against key and policy,
-// and blocks until the context ends or the stream closes.
-func Serve(ctx context.Context, name, version string, key Key, policy Policy, r io.Reader, w io.Writer) error {
-	if key == nil || policy == nil {
+// vault holds the key once it is unlocked. It starts empty: a signer that has just started
+// cannot sign anything, and stays that way until an operator-held passphrase arrives.
+type vault struct {
+	mu  sync.RWMutex
+	key Key
+}
+
+func (v *vault) get() Key {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.key
+}
+
+func (v *vault) set(k Key) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.key = k
+}
+
+// Serve runs a signer extension over stdio: it registers the two tools against the opener and
+// the policy, and blocks until the context ends or the stream closes.
+//
+// The key is NOT loaded here. The process starts locked and signs nothing until the host
+// unlocks it, so a signer that is launched but never unlocked is inert.
+func Serve(ctx context.Context, name, version string, open Opener, policy Policy, r io.Reader, w io.Writer) error {
+	if open == nil || policy == nil {
 		return errors.New("signer: a signer needs both a key and a policy; one without the other is blind signing")
 	}
+	v := &vault{}
 	s := mcpserver.New(name, version)
-	s.Register(publicTool(key))
-	s.Register(signTool(key, policy))
+	s.Register(unlockTool(v, open, policy))
+	s.Register(signTool(v, policy))
 	return s.Serve(ctx, r, w)
 }
 
-// publicTool answers with the public half, so the worker can build a transaction against a key
-// it will never hold. Handing out a public key gives away nothing.
-func publicTool(key Key) mcpserver.Tool {
+// unlockTool opens the key under the host's passphrase and answers with its public half, so the
+// worker can build a transaction against a key it will never hold. Handing out a public key
+// gives away nothing.
+//
+// A policy that must be bound to the key (the fee payer has to BE this key, or the signer would
+// be underwriting somebody else's transaction) is bound here, once the key is known.
+func unlockTool(v *vault, open Opener, policy Policy) mcpserver.Tool {
 	return mcpserver.Tool{
-		Name:        PublicTool,
-		Description: "Return the signer's public key. The private half never leaves this process.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-		Handler: func(context.Context, json.RawMessage) (string, error) {
-			out, err := json.Marshal(map[string]string{
+		Name: UnlockTool,
+		Description: "Unlock the signing key and return its public half. The private half never leaves " +
+			"this process, and the signer can do nothing at all until this succeeds.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
+			`"passphrase":{"type":"string","description":"passphrase that opens the sealed key"}}}`),
+		Handler: func(_ context.Context, input json.RawMessage) (string, error) {
+			var args struct {
+				Passphrase string `json:"passphrase"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return "", fmt.Errorf("signer: malformed unlock request: %w", err)
+			}
+			key, err := open([]byte(args.Passphrase))
+			if err != nil {
+				return "", err
+			}
+			if b, ok := policy.(BindsToKey); ok {
+				b.BindKey(key.Public())
+			}
+			v.set(key)
+
+			out, merr := json.Marshal(map[string]string{
 				"publicKey": base64.StdEncoding.EncodeToString(key.Public()),
 				"curve":     key.Curve(),
 			})
-			if err != nil {
-				return "", fmt.Errorf("signer: encode public key: %w", err)
+			if merr != nil {
+				return "", fmt.Errorf("signer: encode public key: %w", merr)
 			}
 			return string(out), nil
 		},
 	}
+}
+
+// BindsToKey is the optional half of a Policy whose rules depend on the key itself: the Solana
+// policy requires the transaction's fee payer to BE the signing key, which it cannot check
+// until the key is unlocked. A policy that does not implement it is judged on the payload
+// alone.
+type BindsToKey interface {
+	// BindKey tells the policy which key it is guarding.
+	BindKey(pub []byte)
 }
 
 // signTool is the one that matters: parse, decide, and only then sign.
@@ -115,7 +186,7 @@ func publicTool(key Key) mcpserver.Tool {
 // distinction is load-bearing: a caller that reads a reply and finds no signature could mistake
 // it for a successful signature over nothing, and the one thing a signer may never do is let
 // "I refused" be read as "here you go".
-func signTool(key Key, policy Policy) mcpserver.Tool {
+func signTool(v *vault, policy Policy) mcpserver.Tool {
 	return mcpserver.Tool{
 		Name: SignTool,
 		Description: "Sign a transaction, if the signing policy approves it. The transaction is parsed here, " +
@@ -123,6 +194,10 @@ func signTool(key Key, policy Policy) mcpserver.Tool {
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
 			`"payload":{"type":"string","description":"base64 of the exact bytes to sign"}},"required":["payload"]}`),
 		Handler: func(_ context.Context, input json.RawMessage) (string, error) {
+			key := v.get()
+			if key == nil {
+				return "", errors.New("signer: the key is locked, so there is nothing to sign with")
+			}
 			var args struct {
 				Payload string `json:"payload"`
 			}

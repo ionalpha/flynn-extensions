@@ -29,8 +29,10 @@ func FuzzSignHandler(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	refuse := signTool(key, refusing{rule: "the policy refuses everything"})
-	approve := signTool(key, approving{})
+	v := &vault{}
+	v.set(key)
+	refuse := signTool(v, refusing{rule: "the policy refuses everything"})
+	approve := signTool(v, approving{})
 	ctx := context.Background()
 
 	f.Fuzz(func(t *testing.T, input string) {

@@ -22,7 +22,9 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0"
+// version is stamped by the release build (-X main.version). It must be a var: the linker
+// ignores -X for a const, and the binary would report nothing.
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -40,7 +42,12 @@ func run(args []string) error {
 	return serve(args)
 }
 
-// serve is the normal path: unseal the key, build the policy around it, speak MCP on stdio.
+// serve is the normal path: wait to be unlocked, then parse and sign.
+//
+// The key is NOT read here, and the passphrase does NOT come from the environment. The host
+// launches an extension with its environment scrubbed, so no secret reaches this process by
+// ambient means; the passphrase arrives over the MCP channel when the host unlocks us. Until
+// then this process holds nothing and can sign nothing.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("solana-signer", flag.ContinueOnError)
 	keyPath := fs.String("key", "", "path to the sealed signing key (created by `solana-signer seal`)")
@@ -51,27 +58,18 @@ func serve(args []string) error {
 		return errors.New("no --key: a signer with no key can sign nothing")
 	}
 
-	// The passphrase arrives by environment, because flynn launches this process without a
-	// terminal to prompt at. The key on disk stays encrypted either way: an attacker who reads
-	// the disk gets a file they still have to break.
-	pass := []byte(os.Getenv("FLYNN_SIGNER_PASSPHRASE"))
-	if len(pass) == 0 {
-		return errors.New("FLYNN_SIGNER_PASSPHRASE is not set, so the sealed key cannot be opened")
+	open := func(passphrase []byte) (signer.Key, error) {
+		return signer.OpenEd25519Key(*keyPath, passphrase)
 	}
 
-	key, err := signer.OpenEd25519Key(*keyPath, pass)
-	if err != nil {
-		return err
-	}
-
-	// The policy is built AROUND this key: the transaction's fee payer must be this very key,
-	// so a message asking it to underwrite somebody else's transaction is refused. Binding the
-	// policy to the key is what stops a stolen-but-valid-looking transaction from being signed.
-	policy := solana.Solana{Payer: key.Public()}
+	// The policy is bound to the key when the key is unlocked (see signer.BindsToKey): the
+	// transaction's fee payer must be this very key, so a message asking it to underwrite
+	// somebody else's transaction is refused. A pointer, because binding writes to it.
+	policy := &solana.Solana{}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return signer.Serve(ctx, "solana-signer", version, key, policy, os.Stdin, os.Stdout)
+	return signer.Serve(ctx, "solana-signer", version, open, policy, os.Stdin, os.Stdout)
 }
 
 // seal imports a raw key and encrypts it, so the raw key can be destroyed. It reads the

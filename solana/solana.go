@@ -197,3 +197,9 @@ func approveToken(data []byte) (tokenKind, error) {
 		return tokenKindOther, errors.New("an SPL Token instruction this key is not granted for (only minting and revoking are)")
 	}
 }
+
+// BindKey tells the policy which key it guards. The signer calls it once the key is unlocked,
+// because the payer rule cannot be checked before the key is known: a message that names some
+// OTHER account as the fee payer is asking this key to underwrite somebody else's transaction,
+// and that is only answerable once "this key" means something.
+func (p *Solana) BindKey(pub []byte) { p.Payer = pub }

@@ -58,7 +58,8 @@ func sysIx(kind uint32) []byte {
 // authorities. This is what the real engine builds, and it must be approved.
 func goodMint() []byte {
 	accts := [][]byte{payer, metadataProgram, ataProgram, tokenProgram}
-	return msg(accts,
+	return msg(
+		accts,
 		instruction{programIndex: 1, data: []byte{42}},                                       // Metaplex Create
 		instruction{programIndex: 2, data: []byte{1}},                                        // ATA CreateIdempotent
 		instruction{programIndex: 3, data: []byte{splMintTo, 0, 0, 0, 0, 0, 0, 0, 0}},        // MintTo
@@ -79,7 +80,8 @@ func TestApprovesTheLegitimateMint(t *testing.T) {
 // refusal is worth nothing. The host has to be the one that says no.
 func TestRefusesAMintThatKeepsTheMintAuthority(t *testing.T) {
 	accts := [][]byte{payer, tokenProgram}
-	m := msg(accts,
+	m := msg(
+		accts,
 		instruction{programIndex: 1, data: []byte{splMintTo, 0, 0, 0, 0, 0, 0, 0, 0}},
 		instruction{programIndex: 1, data: []byte{splSetAuthority, authorityFreezeAccnt, 0}},
 	)
@@ -96,7 +98,8 @@ func TestRefusesAMintThatKeepsTheMintAuthority(t *testing.T) {
 // selling.
 func TestRefusesAMintThatKeepsTheFreezeAuthority(t *testing.T) {
 	accts := [][]byte{payer, tokenProgram}
-	m := msg(accts,
+	m := msg(
+		accts,
 		instruction{programIndex: 1, data: []byte{splMintTo, 0, 0, 0, 0, 0, 0, 0, 0}},
 		instruction{programIndex: 1, data: []byte{splSetAuthority, authorityMintTokens, 0}},
 	)
@@ -129,7 +132,8 @@ func TestRefusesDrainingTheKey(t *testing.T) {
 func TestRefusesHandingTheMintAuthorityToAnotherKey(t *testing.T) {
 	data := []byte{splSetAuthority, authorityMintTokens, 1} // COption::Some
 	data = append(data, bytes.Repeat([]byte{0xBB}, 32)...)  // ... the attacker's key
-	m := msg([][]byte{payer, tokenProgram},
+	m := msg(
+		[][]byte{payer, tokenProgram},
 		instruction{programIndex: 1, data: []byte{splMintTo, 0, 0, 0, 0, 0, 0, 0, 0}},
 		instruction{programIndex: 1, data: []byte{splSetAuthority, authorityFreezeAccnt, 0}},
 		instruction{programIndex: 1, data: data},
