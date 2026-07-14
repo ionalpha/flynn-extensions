@@ -8,14 +8,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 
 	"golang.org/x/term"
 
@@ -92,11 +95,9 @@ func seal(args []string) error {
 		return err
 	}
 
-	fmt.Fprint(os.Stderr, "passphrase: ")
-	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
+	pass, err := readPassphrase()
 	if err != nil {
-		return fmt.Errorf("read passphrase: %w", err)
+		return err
 	}
 	if len(pass) == 0 {
 		return errors.New("refusing to seal a key under an empty passphrase")
@@ -107,6 +108,35 @@ func seal(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "sealed to %s\nDelete %s now: it is the key, in the clear.\n", *out, *in)
 	return nil
+}
+
+// readPassphrase reads the passphrase without echoing it, when there is a terminal to read
+// from. When there is not, it reads a line from standard input instead, so sealing a key can be
+// scripted (a CI job, a provisioning step) rather than only ever done by hand.
+//
+// It is never a flag. A passphrase on the command line is recorded in the shell history and is
+// visible in the process list to every other user on the machine, which is a worse place for it
+// than the file it is protecting.
+func readPassphrase() ([]byte, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Fprint(os.Stderr, "passphrase: ")
+		pass, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return nil, fmt.Errorf("read passphrase: %w", err)
+		}
+		return pass, nil
+	}
+
+	// Not a terminal: take one line from stdin. The trailing newline a pipe or a heredoc adds
+	// is not part of the passphrase, and a key sealed under "x\n" would refuse to open under
+	// the "x" its owner typed.
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("read passphrase: %w", err)
+	}
+	return []byte(strings.TrimRight(line, "\r\n")), nil
 }
 
 // readRawKey reads the 64-byte JSON array form the Solana tooling emits.
