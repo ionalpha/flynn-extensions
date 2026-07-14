@@ -84,11 +84,16 @@ const (
 // ambient means, and a secret it is meant to have is one the operator handed it deliberately.
 // The host holds the passphrase; this process holds the key. The host never sees the key.
 //
+// keyPath arrives the same way, and for a duller reason: a released extension is launched from
+// a catalog spec whose arguments are fixed when the spec is written, so they cannot name a file
+// on a machine nobody has seen yet. The path is not a secret and the host learns nothing from
+// holding it: it is this process that opens the file, and the key inside it never travels back.
+//
 // That is the right split for the threat this design defends against, which is a compromised
 // WORKER extension, not a compromised host. A host that has been compromised launches whatever
 // binary it likes and is past arguing with; keeping the key out of it buys nothing there. What
 // it buys is that the extension which BUILDS a transaction can never sign one.
-type Opener func(passphrase []byte) (Key, error)
+type Opener func(passphrase []byte, keyPath string) (Key, error)
 
 // maxPayloadBytes bounds a signing request. A transaction is small; anything on this scale is
 // not a transaction, and the parser should not be handed unbounded input from a process that
@@ -142,15 +147,17 @@ func unlockTool(v *vault, open Opener, policy Policy) mcpserver.Tool {
 		Description: "Unlock the signing key and return its public half. The private half never leaves " +
 			"this process, and the signer can do nothing at all until this succeeds.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
-			`"passphrase":{"type":"string","description":"passphrase that opens the sealed key"}}}`),
+			`"passphrase":{"type":"string","description":"passphrase that opens the sealed key"},` +
+			`"keyPath":{"type":"string","description":"path to the sealed key, when the signer was not launched with one"}}}`),
 		Handler: func(_ context.Context, input json.RawMessage) (string, error) {
 			var args struct {
 				Passphrase string `json:"passphrase"`
+				KeyPath    string `json:"keyPath"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return "", fmt.Errorf("signer: malformed unlock request: %w", err)
 			}
-			key, err := open([]byte(args.Passphrase))
+			key, err := open([]byte(args.Passphrase), args.KeyPath)
 			if err != nil {
 				return "", err
 			}

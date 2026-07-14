@@ -43,13 +43,38 @@ func unlocked(t *testing.T) (*vault, *Ed25519Key) {
 }
 
 // opener returns an Opener that hands back key for the right passphrase and fails otherwise,
-// standing in for a sealed file without touching the disk.
+// standing in for a sealed file without touching the disk. It records the path the host named,
+// so a test can prove the path travelled.
 func opener(key Key, want string) Opener {
-	return func(passphrase []byte) (Key, error) {
+	return func(passphrase []byte, _ string) (Key, error) {
 		if string(passphrase) != want {
 			return nil, errors.New("wrong passphrase")
 		}
 		return key, nil
+	}
+}
+
+// pathOpener records the key path it was handed and opens nothing.
+func pathOpener(key Key, seen *string) Opener {
+	return func(_ []byte, keyPath string) (Key, error) {
+		*seen = keyPath
+		return key, nil
+	}
+}
+
+// TestUnlockCarriesTheKeyPathFromTheHost: a released signer is launched from a catalog spec whose
+// arguments were fixed before the machine it runs on existed, so it cannot be told where the key
+// lives by a flag. The host names the path at unlock, and it has to arrive.
+func TestUnlockCarriesTheKeyPathFromTheHost(t *testing.T) {
+	var seen string
+	tool := unlockTool(&vault{}, pathOpener(testKey(t), &seen), approving{})
+
+	in := json.RawMessage(`{"passphrase":"p","keyPath":"/home/someone/.flynn/solana.sealed"}`)
+	if _, err := tool.Handler(context.Background(), in); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	if seen != "/home/someone/.flynn/solana.sealed" {
+		t.Fatalf("the signer was told the key is at %q, not where the host said", seen)
 	}
 }
 

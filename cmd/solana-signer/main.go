@@ -53,17 +53,34 @@ func run(args []string) error {
 // ambient means; the passphrase arrives over the MCP channel when the host unlocks us. Until
 // then this process holds nothing and can sign nothing.
 func serve(args []string) error {
+	return serveWith(args, os.Stdin, os.Stdout)
+}
+
+// serveWith is serve over explicit streams, so the handshake can be driven in a test without a
+// real subprocess on the other end of a pipe.
+func serveWith(args []string, r io.Reader, w io.Writer) error {
 	fs := flag.NewFlagSet("solana-signer", flag.ContinueOnError)
-	keyPath := fs.String("key", "", "path to the sealed signing key (created by `solana-signer seal`)")
+	keyPath := fs.String("key", "",
+		"path to the sealed signing key (created by `solana-signer seal`). A released signer is "+
+			"launched from a catalog spec whose arguments were fixed before this machine existed, so "+
+			"it is normally told the path at unlock instead.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *keyPath == "" {
-		return errors.New("no --key: a signer with no key can sign nothing")
-	}
 
-	open := func(passphrase []byte) (signer.Key, error) {
-		return signer.OpenEd25519Key(*keyPath, passphrase)
+	// The path may come from the flag (an author running the binary by hand) or from the host at
+	// unlock (a released signer, launched from a spec that could not have known where the key
+	// would live). Neither is a secret. If both are given the flag wins, because the operator who
+	// typed it is looking right at it.
+	open := func(passphrase []byte, fromHost string) (signer.Key, error) {
+		path := *keyPath
+		if path == "" {
+			path = fromHost
+		}
+		if path == "" {
+			return nil, errors.New("no sealed key: pass --key, or have the host name one at unlock")
+		}
+		return signer.OpenEd25519Key(path, passphrase)
 	}
 
 	// The policy is bound to the key when the key is unlocked (see signer.BindsToKey): the
@@ -73,7 +90,7 @@ func serve(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return signer.Serve(ctx, "solana-signer", version, open, policy, os.Stdin, os.Stdout)
+	return signer.Serve(ctx, "solana-signer", version, open, policy, r, w)
 }
 
 // seal imports a raw key and encrypts it, so the raw key can be destroyed. It reads the
