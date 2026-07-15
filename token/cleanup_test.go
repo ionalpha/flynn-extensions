@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,6 +260,31 @@ func TestMintHappyPathSucceeds(t *testing.T) {
 	}
 	if mint.IsZero() {
 		t.Fatal("expected a mint address on success")
+	}
+}
+
+// TestMintRejectsAnIncompleteRequest refuses a first-call request that omits a field the tool
+// declares required. A missing supply parses to zero and a missing metadataUri is an empty
+// string, and either would otherwise create a permanently empty or metadata-less token on-chain
+// and hand it back as a success. Both are refused before any on-chain action, so a mistyped or
+// dropped field costs a clear error, not a junk mint.
+func TestMintRejectsAnIncompleteRequest(t *testing.T) {
+	cases := map[string]struct {
+		mut  func(*MintSpec)
+		want string
+	}{
+		"zero supply":     {func(s *MintSpec) { s.Supply = 0 }, "supply must be greater than zero"},
+		"no metadata uri": {func(s *MintSpec) { s.MetadataURI = "" }, "metadataUri must be"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			eng := newTestEngine(&fakeRPC{confirm: true, lastValid: 100})
+			s := safeSpec()
+			tc.mut(&s)
+			if _, _, err := eng.Mint(context.Background(), s); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Mint(%s) error = %v, want it to mention %q", name, err, tc.want)
+			}
+		})
 	}
 }
 

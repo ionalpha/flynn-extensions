@@ -92,6 +92,13 @@ func (e *Engine) Mint(ctx context.Context, s MintSpec) (solana.PublicKey, []safe
 	if err := validateMetadata(s.Name, s.Symbol, s.MetadataURI); err != nil {
 		return solana.PublicKey{}, nil, err
 	}
+	// A fixed-supply token whose supply is zero is a mint that gets its authority revoked with
+	// nothing ever minted: a permanently empty token nobody asked for. It is the shape an omitted
+	// or mistyped supply produces (a missing field parses to zero), so it is refused here rather
+	// than created on-chain and handed back as a success.
+	if s.Supply == 0 {
+		return solana.PublicKey{}, nil, errors.New("supply must be greater than zero")
+	}
 	// Ask the chain which chain it is. This has to happen before the policy runs, because the
 	// answer is what decides whether this mint is allowed to put the whole supply in a hot key.
 	e.resolveNetwork(ctx)
@@ -237,8 +244,8 @@ func validateMetadata(name, symbol, uri string) error {
 		return fmt.Errorf("name must be 1..%d bytes, got %d", maxNameLen, len(name))
 	case len(symbol) == 0 || len(symbol) > maxSymbolLen:
 		return fmt.Errorf("symbol must be 1..%d bytes, got %d", maxSymbolLen, len(symbol))
-	case len(uri) > maxURILen:
-		return fmt.Errorf("uri must be at most %d bytes, got %d", maxURILen, len(uri))
+	case len(uri) == 0 || len(uri) > maxURILen:
+		return fmt.Errorf("metadataUri must be 1..%d bytes, got %d", maxURILen, len(uri))
 	}
 	return nil
 }
